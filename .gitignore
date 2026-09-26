@@ -17,6 +17,7 @@ node_modules/
 /tests/*.js
 /tests/*.mjs
 !/tests/test_desktop_i18n.mjs
+!/tests/test_desktop_freshness.mjs
 /tests/browser_bridge.py
 /tests/live_*.py
 

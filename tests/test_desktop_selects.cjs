@@ -62,7 +62,8 @@ async function renderPage({ legacyHost = false } = {}) {
   }
   if (!legacyHost) host.state.connectionId = {}
   const components = Object.fromEntries([
-    'Button', 'Codicon', 'Input', 'Select', 'SelectContent', 'SelectItem',
+    'Button', 'Codicon', 'Input', 'Switch', 'Popover', 'PopoverTrigger', 'PopoverContent',
+    'Select', 'SelectContent', 'SelectItem',
     'SelectTrigger', 'SelectValue', 'Tabs', 'TabsList', 'TabsTrigger'
   ].map(name => [name, sdkComponent(name)]))
   const jsx = (type, props = {}) => {
@@ -120,9 +121,14 @@ async function renderPage({ legacyHost = false } = {}) {
   }
   const sdkExports = {
     ...components,
+    atom: initial => {
+      let value = initial
+      return { get: () => value, set: next => { value = next } }
+    },
     PALETTE_AREA: 'palette',
     ROUTES_AREA: 'routes',
     SIDEBAR_NAV_AREA: 'sidebar',
+    STATUSBAR_AREAS: { right: 'status-right' },
     host,
     useQuery,
     useQueryClient: () => ({ invalidateQueries() {} }),
@@ -149,6 +155,7 @@ async function renderPage({ legacyHost = false } = {}) {
 
   const contributions = []
   const ctx = {
+    onDispose() {},
     i18n: {
       register(value) { bundles = value },
       t

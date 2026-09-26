@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-import copy
+from email.utils import parsedate_to_datetime
 import hashlib
 import importlib.util
 import json
 import math
+import re
 import sys
-import threading
-import time
+
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,26 +39,39 @@ _history = importlib.util.module_from_spec(_history_spec)
 sys.modules[_history_spec.name] = _history
 _history_spec.loader.exec_module(_history)
 
+_cache_spec = importlib.util.spec_from_file_location(__name__ + '_quota_cache', Path(__file__).with_name('quota_cache.py'))
+_quota_cache_module = importlib.util.module_from_spec(_cache_spec)
+sys.modules[_cache_spec.name] = _quota_cache_module
+_cache_spec.loader.exec_module(_quota_cache_module)
+QuotaCache = _quota_cache_module.QuotaCache
+
+_oauth_spec = importlib.util.spec_from_file_location(__name__ + '_oauth_refresh', Path(__file__).with_name('oauth_refresh.py'))
+_oauth_refresh = importlib.util.module_from_spec(_oauth_spec)
+sys.modules[_oauth_spec.name] = _oauth_refresh
+_oauth_spec.loader.exec_module(_oauth_refresh)
+request_with_owned_oauth = _oauth_refresh.request_with_owned_oauth
+
 router = APIRouter()
 TTL = 60
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130.0 Safari/537.36"
 NAMES = {"openai-codex": "Codex", "anthropic": "Claude", "deepseekv4pro": "DeepSeek V4 Pro", "zai": "GLM · Z.ai"}
 LINKS = {"openai-codex": "https://chatgpt.com/codex/settings/usage", "anthropic": "https://claude.ai/settings/usage", "deepseekv4pro": "https://deepseekv4pro.com/dashboard", "zai": "https://z.ai/manage-apikey/subscription"}
-_cache = {}
-_locks = {}
-_guard = threading.Lock()
+_quota_cache = QuotaCache()
 PROBLEM_PARAM_KEYS = {"upstream.http": frozenset({"status"})}
 
 
 class QuotaError(Exception):
     """Only static, credential-free messages and allowlisted problem metadata are exposed."""
 
-    def __init__(self, message, status=None, *, code="provider.fetchFailed", params=None, retryable=None):
+    def __init__(self, message, status=None, *, code="provider.fetchFailed", params=None,
+                 retryable=None, retry_after=0.0, hard=False):
         super().__init__(message)
         self.status = status
         self.code = code
         self.params = dict(params or {})
         self.retryable = bool(status == 429) if retryable is None else bool(retryable)
+        self.retry_after = retry_after
+        self.hard = hard
 
     def problem(self):
         allowed = PROBLEM_PARAM_KEYS.get(self.code, ())
@@ -124,8 +137,11 @@ def duration(seconds):
 
 def window(key, label, group="Geral", *, used=None, limit=None, remaining=None,
            percent=None, reset=None, period=None, unit="%", details=None, unlimited=False,
-           label_display=None, group_display=None, unit_code="percent"):
+           label_display=None, group_display=None, unit_code="percent", period_seconds=None):
     used, limit, remaining, percent = map(number, (used, limit, remaining, percent))
+    period_seconds = number(period_seconds)
+    if period_seconds is not None and period_seconds <= 0:
+        period_seconds = None
     if remaining is None and limit is not None and used is not None:
         remaining = max(0, limit - used)
     if used is None and limit is not None and remaining is not None:
@@ -138,7 +154,7 @@ def window(key, label, group="Geral", *, used=None, limit=None, remaining=None,
     return {"id": key, "label": label, "group": group, "used": used, "limit": limit,
             "remaining": remaining, "used_percent": percent,
             "remaining_percent": max(0, 100 - percent) if percent is not None else None,
-            "reset_at": stamp(reset), "period": period, "unit": unit,
+            "reset_at": stamp(reset), "period": period, "period_seconds": period_seconds, "unit": unit,
             "details": details or [], "unlimited": unlimited,
             "display": {"label": label_display or display_literal(label),
                         "group": group_display or display_literal(group)},
@@ -153,6 +169,11 @@ def fact(label, value, *, label_display=None, value_display=None, unit_code=None
     if unit_code is not None:
         result["unit_code"] = unit_code
     return result
+
+
+def reset_count(value):
+    """Counts cross JSON into JavaScript: reject coercion and unsafe integers."""
+    return int(value) if type(value) in (int, float) and 0 <= value < 2**53 and int(value) == value else None
 
 
 def normalize_codex(payload):
@@ -174,7 +195,7 @@ def normalize_codex(payload):
             seconds = row.get("limit_window_seconds")
             label = duration(seconds)
             windows.append(window(f"{prefix}-{key}", label, group, percent=row.get("used_percent"),
-                                  reset=row.get("reset_at"), period=label,
+                                  reset=row.get("reset_at"), period=label, period_seconds=seconds,
                                   label_display=period_display(seconds), group_display=group_display))
     credits = payload.get("credits") or {}
     if credits.get("unlimited"):
@@ -184,15 +205,72 @@ def normalize_codex(payload):
     elif number(credits.get("balance")) is not None:
         facts.append(fact("Créditos adicionais", credits["balance"],
                           label_display=display_message("fact.additionalCredits"), unit_code="api_credit"))
-    resets = payload.get("rate_limit_reset_credits") or {}
-    if number(resets.get("available_count")) is not None:
-        facts.append(fact("Reposições disponíveis", resets["available_count"],
+    resets = payload.get("rate_limit_reset_credits")
+    count = reset_count(resets.get("available_count")) if isinstance(resets, dict) else None
+    if count is not None:
+        facts.append(fact("Reposições disponíveis", count,
                           label_display=display_message("fact.availableResets")))
     spend = payload.get("spend_control") or {}
     if number(spend.get("individual_limit")) is not None:
         facts.append(fact("Limite individual de despesa", spend["individual_limit"],
                           label_display=display_message("fact.individualSpendLimit")))
     return {"windows": windows, "facts": facts, "plan": payload.get("plan_type"), "source": "chatgpt.com · wham/usage"}
+
+
+def claude_reset_count(payload):
+    """Read evaluated OAuth offers, not scheduled reset times (see README sources)."""
+    cedar = payload.get("cedar_ember")
+    count = None
+    if isinstance(cedar, dict) and cedar.get("eligible") is True and isinstance(cedar.get("grants"), list):
+        count, seen = 0, {}
+        now = datetime.now(timezone.utc)
+        for grant in cedar["grants"]:
+            if not isinstance(grant, dict):
+                return None
+            grant_id = grant.get("id")
+            if not isinstance(grant_id, str) or not re.fullmatch(r"[a-z0-9_-]{1,40}", grant_id):
+                return None
+            remaining = reset_count(grant.get("resets_left"))
+            total = reset_count(grant.get("resets_total"))
+            if remaining is None or ("resets_total" in grant and (total is None or total < remaining)):
+                return None
+            dates = []
+            for field in ("starts_at", "ends_at"):
+                raw = grant.get(field)
+                if raw is None:
+                    dates.append(None)
+                    continue
+                if not isinstance(raw, str) or not raw.strip():
+                    return None
+                try:
+                    date = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+                dates.append(date.replace(tzinfo=date.tzinfo or timezone.utc))
+            start, expiry = dates
+            if start is not None and expiry is not None and start >= expiry:
+                return None
+            if grant_id in seen:
+                if seen[grant_id] != grant:
+                    return None
+                continue
+            seen[grant_id] = grant
+            # starts_at is the grant's start, not the next automatic quota reset.
+            # Count banked inventory, not usable_now (which is wall/cooldown gated).
+            if (start is None or start <= now) and (expiry is None or expiry > now):
+                count += remaining
+        if count > 0:
+            return reset_count(count)
+    juniper = payload.get("juniper_tide")
+    if (isinstance(juniper, dict) and juniper.get("eligible") is True
+            and juniper.get("arm") == "reset" and type(juniper.get("available")) is bool):
+        if juniper["available"]:
+            return 1
+        if count == 0:
+            return 0
+    # A zero needs both inventories evaluated. Null or surface-gated programs
+    # leave discovery incomplete even when the other program reports zero.
+    return None
 
 
 def normalize_claude(payload):
@@ -203,12 +281,44 @@ def normalize_claude(payload):
               "seven_day_oauth_apps": ("Apps OAuth · 7 d", display_message("window.oauthAppsPeriod", 7, "day"))}
     windows, facts = [], []
     for key, row in payload.items():
-        if key == "extra_usage" or not isinstance(row, dict) or "utilization" not in row:
+        if key in {"extra_usage", "nimbus_quill"} or not isinstance(row, dict) or "utilization" not in row:
             continue
         legacy, label_display = labels.get(key, (key.replace("_", " "), display_literal(key.replace("_", " "))))
+        period_seconds = 18000 if key == "five_hour" else (604800 if key.startswith("seven_day") else None)
         # Anthropic utilization is already a percentage: 0.5 means 0.5%, NOT 50%.
         windows.append(window(key, legacy, "Claude", percent=row.get("utilization"), reset=row.get("resets_at"),
-                              label_display=label_display, group_display=display_literal("Claude")))
+                              label_display=label_display, group_display=display_literal("Claude"),
+                              period_seconds=period_seconds))
+    limits = payload.get("limits")
+    for limit in limits if isinstance(limits, list) else []:
+        if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+            continue
+        scope = limit.get("scope")
+        if not isinstance(scope, dict):
+            continue
+        model = scope.get("model")
+        if not isinstance(model, dict):
+            continue
+        model_name = model.get("display_name")
+        percent = number(limit.get("percent"))
+        if not isinstance(model_name, str) or not model_name.strip() or percent is None:
+            continue
+        model_name = model_name.strip()
+        model_slug = "_".join(part for part in "".join(
+            character.lower() if character.isalnum() else " " for character in model_name
+        ).split() if part)
+        # Display names are not identities: distinct surfaces/models can share
+        # one name or normalize to the same slug. Never merge those buckets.
+        base_key = f"weekly_scoped_{model_slug or 'model'}"
+        key, suffix = base_key, 2
+        used_ids = {item['id'] for item in windows}
+        while key in used_ids:
+            key = f"{base_key}_{suffix}"
+            suffix += 1
+        windows.append(window(key, f"{model_name} · 7 d", "Claude",
+                              percent=percent, reset=limit.get("resets_at"),
+                              label_display=display_message("window.modelPeriod", model_name, 7, "day"),
+                              group_display=display_literal("Claude"), period_seconds=604800))
     extra = payload.get("extra_usage") or {}
     if extra.get("is_enabled"):
         currency = extra.get("currency")
@@ -228,6 +338,10 @@ def normalize_claude(payload):
         facts.append(fact("Utilização extra", "Desativada",
                           label_display=display_message("fact.extraUsage"),
                           value_display=display_message("value.disabled")))
+    count = claude_reset_count(payload)
+    if count is not None:
+        facts.append(fact("Reposições disponíveis", count,
+                          label_display=display_message("fact.availableResets")))
     return {"windows": windows, "facts": facts, "plan": None, "source": "api.anthropic.com · oauth/usage"}
 
 
@@ -243,6 +357,7 @@ def normalize_zai(payload):
         kind = row.get("type", "Limite")
         unit, count = number(row.get("unit")), number(row.get("number"))
         period_units = {1: ("min", "minute"), 3: ("h", "hour"), 4: ("d", "day"), 5: ("mês", "month"), 6: ("semana", "week")}
+        period_multipliers = {1.0: 60, 3.0: 3600, 4.0: 86400, 6.0: 604800}
         legacy_unit, semantic_unit = period_units.get(unit, ("unid. de período", None))
         period = f"{count:g} {legacy_unit}" if count is not None else "Período não indicado"
         label = {"TOKENS_LIMIT": "Tokens", "TIME_LIMIT": "Ferramentas / MCP"}.get(kind, str(kind))
@@ -268,7 +383,9 @@ def normalize_zai(payload):
                               reset=row.get("nextResetTime"), period=period,
                               unit="chamadas" if kind == "TIME_LIMIT" else "tokens", details=details,
                               label_display=label_display, group_display=group_display,
-                              unit_code=unit_code))
+                              unit_code=unit_code,
+                              period_seconds=(count * period_multipliers[unit]
+                                              if count is not None and unit in period_multipliers else None)))
     return {"windows": windows, "facts": [], "plan": data.get("level"), "source": "api.z.ai · monitor/usage/quota/limit"}
 
 
@@ -303,9 +420,25 @@ def get_json(url, headers):
                     403: "O fornecedor recusou acesso aos dados de utilização.",
                     429: "Pedidos de utilização temporariamente limitados pelo fornecedor."}
         codes = {401: "auth.rejected", 403: "auth.forbidden", 429: "upstream.rateLimited"}
+        retry_after = 0.0
+        if exc.code == 429:
+            value = exc.headers.get("Retry-After", 0)
+            try:
+                retry_after = float(value)
+            except (TypeError, ValueError):
+                try:
+                    retry_at = parsedate_to_datetime(str(value))
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    retry_after = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = 0.0
+            if not math.isfinite(retry_after):
+                retry_after = 0.0
         raise QuotaError(messages.get(exc.code, f"A API de utilização respondeu HTTP {exc.code}."),
                          status=exc.code, code=codes.get(exc.code, "upstream.http"),
-                         params={"status": exc.code}, retryable=exc.code == 429 or exc.code >= 500) from None
+                         params={"status": exc.code}, retryable=exc.code == 429 or exc.code >= 500,
+                         retry_after=max(0.0, retry_after)) from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise QuotaError("Não foi possível contactar a API de utilização. Tente novamente dentro de um minuto.",
                          code="network.unreachable", retryable=True) from None
@@ -387,30 +520,44 @@ def discover():
 def fetch_provider(provider):
     kind = provider["id"]
     if kind == "openai-codex":
-        from agent.account_usage import _resolve_codex_usage_credentials, _codex_backend_urls, _codex_headers
-        token, base, account = _resolve_codex_usage_credentials(None, None)
-        # Native credential resolution retains OAuth/pool/account selection semantics;
-        # own parsing retains additional model windows omitted by Hermes' summary.
-        try:
-            payload = get_json(_codex_backend_urls(base)[0], _codex_headers(token, account))
-        except QuotaError as exc:
-            # Hermes 0.21.3 has the complete discovery/route contract, but its
-            # Codex resolver cannot force-refresh. Preserve the actionable 401
-            # rather than passing an unsupported keyword or switching accounts.
-            from inspect import signature
-            if exc.status != 401 or 'force_refresh' not in signature(_resolve_codex_usage_credentials).parameters:
-                raise
-            token, base, account = _resolve_codex_usage_credentials(None, None, force_refresh=True)
-            payload = get_json(_codex_backend_urls(base)[0], _codex_headers(token, account))
-        return normalize_codex(payload)
+        def fetch_codex(credential):
+            headers = {"Authorization": f"Bearer {credential.token}", "User-Agent": "codex-cli"}
+            if credential.account_identity:
+                headers["ChatGPT-Account-Id"] = credential.account_identity
+            return normalize_codex(get_json("https://chatgpt.com/backend-api/wham/usage", headers))
+
+        return request_with_owned_oauth("openai-codex", fetch_codex)
     if kind == "anthropic":
-        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
-        token = resolve_anthropic_token()
-        if not token or not _is_oauth_token(token):
-            raise QuotaError("Limites Claude requerem uma conta OAuth no Hermes; uma chave API não fornece a quota da subscrição.",
-                             code="auth.oauthRequired", retryable=False)
-        return normalize_claude(get_json("https://api.anthropic.com/api/oauth/usage", {
-            "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}))
+        def fetch_claude(credential):
+            url = "https://api.anthropic.com/api/oauth/usage"
+            headers = {"Authorization": f"Bearer {credential.token}", "anthropic-beta": "oauth-2025-04-20",
+                       "User-Agent": "claude-code/2.1.0"}
+            payload = get_json(url, headers)
+            retry_after = None
+            # Read-only discovery belongs to this same credential and quota cache.
+            # Never infer zero from the unevaluated null blocks in plain /usage.
+            if claude_reset_count(payload) is None:
+                try:
+                    for field, query in (("cedar_ember", "cedar_ember=1"), ("juniper_tide", "at_wall=1")):
+                        probe = get_json(f"{url}?{query}&skip_spend=1", headers)
+                        payload[field] = probe.get(field)
+                        if (claude_reset_count(payload) or 0) > 0:
+                            break
+                except QuotaError as exc:
+                    if exc.status in (401, 403) or exc.hard:
+                        raise
+                    # Optional discovery failure must not hide ordinary quotas.
+                    payload.pop("cedar_ember", None)
+                    payload.pop("juniper_tide", None)
+                    if exc.status == 429:
+                        retry_after = exc.retry_after
+            result = normalize_claude(payload)
+            if retry_after is not None:
+                # Internal cache metadata, removed before serialization.
+                result["_rate_limit_retry_after"] = retry_after
+            return result
+
+        return request_with_owned_oauth("anthropic", fetch_claude)
     from hermes_cli.runtime_provider import resolve_runtime_provider
     runtime = resolve_runtime_provider(requested=provider["route"])
     token = runtime.get("api_key")
@@ -465,7 +612,8 @@ def normalize_deepseek(payload):
                                   limit=row.get("limitCredits"), remaining=row.get("remainingCredits"),
                                   reset=row.get("resetAt"), unit="créditos", details=details,
                                   label_display=label_display, group_display=name_display,
-                                  unit_code="flash_credit"))
+                                  unit_code="flash_credit",
+                                  period_seconds={"fiveHour": 18000, "sevenDay": 604800}.get(key)))
         for model, usage in (quota.get("usageByModel") or {}).items():
             if isinstance(usage, dict) and number(usage.get("chargedCredits")) is not None:
                 label_display = (display_message("fact.modelChargedCredits", name, model)
@@ -505,55 +653,76 @@ def fetch_deepseek(token):
 def _signature(home):
     # Hash stays server-side, isolates cache on credential/config change.
     digest = hashlib.sha256()
-    for name in ("config.yaml", "auth.json", ".env", ".anthropic_oauth.json"):
-        path = home / name
+    from hermes_constants import get_default_hermes_root
+    paths = [home / name for name in ("config.yaml", "auth.json", ".env", ".anthropic_oauth.json")]
+    root = get_default_hermes_root()
+    if root.resolve() != home.resolve():
+        # Hermes can borrow the default profile's OAuth pool/auth singleton.
+        # A root login/logout must invalidate a named profile's cached quota
+        # even when nothing in that named profile's directory has changed.
+        paths.extend((root / "auth.json", root / ".anthropic_oauth.json"))
+    for path in paths:
         if path.is_file():
+            digest.update(str(path).encode())
             digest.update(path.read_bytes())
     from agent.secret_scope import current_secret_scope
     digest.update(json.dumps(dict(current_secret_scope() or {}), sort_keys=True).encode())
     return digest.hexdigest()
 
 
+_PROBLEM_COPY = {
+    "account.changed": "A conta selecionada mudou durante a atualização; os dados anteriores foram revogados.",
+    "auth.accountIdentityUnavailable": "Não foi possível verificar a identidade da conta OAuth selecionada.",
+    "auth.invalidGrant": "A sessão OAuth expirou e requer nova autenticação no Hermes.",
+    "auth.ownedOAuthRequired": "Os limites requerem uma sessão OAuth pertencente a este perfil Hermes.",
+    "auth.ownedOAuthUnavailable": "A sessão OAuth selecionada não pode ser atualizada com segurança.",
+    "auth.refreshFailed": "Não foi possível atualizar temporariamente a sessão OAuth.",
+    "auth.rejected": "Autenticação expirada ou recusada. Verifique o fornecedor no Hermes.",
+    "auth.forbidden": "O fornecedor recusou acesso aos dados de utilização.",
+    "credentials.missing": "Não existe uma credencial utilizável para este fornecedor no perfil Hermes.",
+    "credentials.unreadable": "Não foi possível ler as credenciais do perfil Hermes.",
+    "network.unreachable": "Não foi possível contactar a API de utilização. Tente novamente dentro de um minuto.",
+    "provider.noLimits": "O fornecedor não devolveu limites ou saldos para esta conta.",
+    "upstream.rateLimited": "Pedidos de utilização temporariamente limitados pelo fornecedor.",
+}
+
+
+def _problem_from_code(code):
+    retryable = code in {
+        "auth.refreshFailed", "network.unreachable", "upstream.rateLimited", "provider.fetchFailed",
+    } or code == "upstream.http"
+    return {"code": code, "params": {}, "retryable": retryable}
+
+
 def cached_provider(provider, scope):
-    key = (scope, provider["id"])
-    with _guard:
-        lock = _locks.setdefault(key, threading.Lock())
-    with lock:
-        now = time.monotonic()
-        old = _cache.get(key)
-        if old and now - old["attempt"] < TTL:
-            return copy.deepcopy(old["value"])
-        base = {"id": provider["id"], "name": NAMES[provider["id"]], "url": LINKS[provider["id"]],
-                "status": "ok", "windows": [], "facts": [], "plan": None, "plan_display": None, "source": None,
-                "fetched_at": None, "error": None, "problem": None}
-        try:
-            data = fetch_provider(provider)
-            base.update(data)
-            base["fetched_at"] = datetime.now(timezone.utc).isoformat()
-            if not base["windows"] and not base["facts"]:
-                raise QuotaError("O fornecedor não devolveu limites ou saldos para esta conta.",
-                                 code="provider.noLimits", retryable=False)
-        except Exception as exc:
-            if old and old["value"].get("fetched_at"):
-                base = copy.deepcopy(old["value"])
-                base["status"] = "stale"
-            else:
-                base["status"] = "unavailable"
-            if isinstance(exc, QuotaError):
-                base["error"] = str(exc)
-                base["problem"] = exc.problem()
-            else:
-                base["error"] = "Não foi possível obter a utilização com as credenciais deste perfil. Verifique o fornecedor no Hermes."
-                base["problem"] = QuotaError(base["error"]).problem()
-        _cache[key] = {"attempt": time.monotonic(), "value": base}
-        # Bound old profile/config generations; no quota snapshots persisted to disk.
-        if len(_cache) > 64:
-            with _guard:
-                obsolete = sorted(_cache, key=lambda k: _cache[k]["attempt"])[:-32]
-                for k in obsolete:
-                    _cache.pop(k, None)
-                    _locks.pop(k, None)
-        return copy.deepcopy(base)
+    base = {"id": provider["id"], "name": NAMES[provider["id"]], "url": LINKS[provider["id"]],
+            "status": "ok", "windows": [], "facts": [], "plan": None, "plan_display": None, "source": None,
+            "fetched_at": None, "age_seconds": None, "next_refresh_at": None,
+            "error": None, "problem": None}
+
+    def fetch_nonempty():
+        data = fetch_provider(provider)
+        if not data.get("windows") and not data.get("facts"):
+            raise QuotaError("O fornecedor não devolveu limites ou saldos para esta conta.",
+                             code="provider.noLimits", retryable=False)
+        return data
+
+    identity_key = "\0".join(str(part) for part in scope)
+    view = _quota_cache.get(provider["id"], identity_key, fetch_nonempty)
+    if view.good is not None:
+        base.update(view.good)
+    base["status"] = "ok" if view.status in {"fresh", "cached"} else view.status
+    base["fetched_at"] = (datetime.fromtimestamp(view.fetched_at, timezone.utc).isoformat()
+                          if view.fetched_at is not None else None)
+    base["age_seconds"] = view.age_seconds
+    base["next_refresh_at"] = datetime.fromtimestamp(view.next_refresh_at, timezone.utc).isoformat()
+    if view.problem_code:
+        base["error"] = _PROBLEM_COPY.get(
+            view.problem_code,
+            "Não foi possível obter a utilização com as credenciais deste perfil. Verifique o fornecedor no Hermes.",
+        )
+        base["problem"] = _problem_from_code(view.problem_code)
+    return base
 
 
 @router.get("/quota")
@@ -562,14 +731,21 @@ async def quota(profile: str | None = Query(default=None, max_length=100)):
     from hermes_constants import get_hermes_home
     with _config_profile_scope(profile):
         home = get_hermes_home()
+        profile_name = profile or "current"
+        profile_identity = {
+            "name": profile_name,
+            "id": hashlib.sha256(str(home.resolve()).encode()).hexdigest(),
+        }
         try:
             providers = await asyncio.to_thread(discover)
-            scope = (str(home.resolve()), await asyncio.to_thread(_signature, home))
+            scope = (profile_identity["id"], await asyncio.to_thread(_signature, home))
             rows = await asyncio.gather(*(asyncio.to_thread(cached_provider, p, scope) for p in providers))
         except QuotaError as exc:
-            return {"schema_version": 2, "providers": [], "error": str(exc), "problem": exc.problem(),
-                    "profile": profile or "current", "refresh_seconds": TTL}
-        return {"schema_version": 2, "providers": rows, "profile": profile or "current", "refresh_seconds": TTL,
+            return {"schema_version": 3, "providers": [], "error": str(exc), "problem": exc.problem(),
+                    "profile": profile_name, "profile_identity": profile_identity,
+                    "refresh_seconds": TTL, "checked_at": datetime.now(timezone.utc).isoformat()}
+        return {"schema_version": 3, "providers": rows, "profile": profile_name,
+                "profile_identity": profile_identity, "refresh_seconds": TTL,
                 "checked_at": datetime.now(timezone.utc).isoformat(), "error": None, "problem": None}
 
 

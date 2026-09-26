@@ -20,13 +20,14 @@ async function loadPlugin({
   locale = 'en',
   quotaData = { schema_version: 2, providers: [], problem: null, error: null, refresh_seconds: 60 },
   historyData = null,
+  quotaError = null,
   legacyHost = false,
   transformSource = source => source
 } = {}) {
   const state = {
     bundles: null, contributions: null, locale, quotaData, historyData,
     // Captured so tests can execute the real queryFn instead of trusting a stub.
-    queries: new Map(), restCalls: [], restImpl: null
+    queries: new Map(), restCalls: [], restImpl: null, stored: new Map()
   }
   const context = vm.createContext({
     console, URL, URLSearchParams, Intl, Date, Math, Map, Set, Number, String, Object, Array, Promise,
@@ -48,27 +49,36 @@ async function loadPlugin({
   }
   const Passthrough = props => ({ type: 'sdk', props })
   const sdkComponent = name => props => ({ type: name, props })
+  const atom = initial => {
+    let value = initial
+    return { get: () => value, set: next => { value = next } }
+  }
   const sdk = {
-    host,
+    host, atom,
     useValue: store => {
       if (!store) throw new TypeError('useValue requires a store')
+      if (typeof store.get === 'function') return store.get()
       return store === host.state.profile ? 'angel' : 'connection-a'
     },
     useQuery: options => {
       state.queries.set(options.queryKey[0], options)
       return options.queryKey[0] === 'provider-limits'
-        ? { data: state.quotaData, isPending: false, isFetching: false, error: null, refetch() {} }
+        ? { data: state.quotaData, isPending: false, isFetching: false, error: quotaError, refetch() {} }
         : { data: state.historyData, isPending: false, isFetching: false, error: null, refetch() {} }
     },
     useQueryClient: () => ({ invalidateQueries() {} }),
     usePluginI18n: () => (key, ...args) => translate(state.bundles, state.locale, key, ...args),
     useI18n: () => ({ locale: state.locale }),
     Button: Passthrough, Input: Passthrough, Codicon: Passthrough,
+    Switch: sdkComponent('sdk-switch'),
+    Popover: sdkComponent('sdk-popover'), PopoverTrigger: sdkComponent('sdk-popover-trigger'),
+    PopoverContent: sdkComponent('sdk-popover-content'),
     Select: sdkComponent('Select'), SelectContent: sdkComponent('SelectContent'),
     SelectItem: sdkComponent('SelectItem'), SelectTrigger: sdkComponent('SelectTrigger'),
     SelectValue: sdkComponent('SelectValue'),
     Tabs: Passthrough, TabsList: Passthrough, TabsTrigger: Passthrough,
-    ROUTES_AREA: 'routes', SIDEBAR_NAV_AREA: 'sidebar', PALETTE_AREA: 'palette'
+    ROUTES_AREA: 'routes', SIDEBAR_NAV_AREA: 'sidebar', PALETTE_AREA: 'palette',
+    STATUSBAR_AREAS: { right: 'status-right' }
   }
   const element = (type, props, key) => ({ type, props: props || {}, key })
   await module.link(specifier => {
@@ -83,6 +93,7 @@ async function loadPlugin({
   })
   await module.evaluate()
   const ctx = {
+    onDispose() {},
     rest: async (path, init) => {
       state.restCalls.push({ path, init })
       if (state.restImpl) return state.restImpl(path, init)
@@ -93,7 +104,11 @@ async function loadPlugin({
       register(value) { state.bundles = value },
       t(key, ...args) { return translate(state.bundles, state.locale, key, ...args) }
     },
-    registerMany(value) { state.contributions = value }
+    registerMany(value) { state.contributions = value },
+    storage: {
+      get(key, fallback) { return state.stored.has(key) ? state.stored.get(key) : fallback },
+      set(key, value) { state.stored.set(key, value) }
+    }
   }
   if (!legacyHost) ctx.os = { openExternal() {} }
   module.namespace.default.register(ctx)
@@ -129,7 +144,8 @@ const quotaData = {
   schema_version: 2, problem: null, error: null, refresh_seconds: 60,
   providers: [{
     id: 'openai-codex', name: 'Codex', status: 'stale', plan: 'plus', source: 'chatgpt.com · wham/usage',
-    fetched_at: '2026-09-18T17:00:00Z', error: 'Autenticação expirada ou recusada.',
+    // Localization fixtures must remain inside the display-age ceiling.
+    fetched_at: new Date().toISOString(), error: 'Autenticação expirada ou recusada.',
     problem: { code: 'auth.rejected', params: {}, retryable: false },
     windows: [{
       id: 'review-primary_window', label: '5 h', group: 'Revisão de código', unit: '%', unit_code: 'percent',
@@ -185,6 +201,37 @@ test('renders the empty provider page in English from the active Hermes locale',
   assert.match(text, /Account quotas and Hermes usage, session by session\./)
   assert.match(text, /No supported providers are active/)
   assert.doesNotMatch(text, /Utilização|fornecedor|Consulta|Nenhum destes/)
+})
+
+test('page transport failures honor the same stale ceiling and hard provider state as status gauges', async () => {
+  for (const expired of [false, true]) {
+    const provider = { ...quotaData.providers[0], status: expired ? 'ok' : 'unavailable',
+      fetched_at: new Date(Date.now() - 901_000).toISOString(), age_seconds: 0,
+      windows: expired ? quotaData.providers[0].windows : [], facts: [],
+      problem: expired ? null : { code: 'auth.rejected', params: {}, retryable: false }, error: null }
+    const { state } = await loadPlugin({
+      quotaData: { ...quotaData, providers: [provider] }, quotaError: new Error('connection refused')
+    })
+    const page = state.contributions.find(item => item.area === 'routes').render()
+    const text = flattenText(page).join(' ')
+    assert.match(text, /Unavailable/)
+    assert.equal(findNodes(page, node => node.props?.role === 'progressbar').length, 0)
+    if (!expired) assert.match(text, /Authentication expired or denied/)
+  }
+})
+
+test('renders three default-off accessible status gauge switches and updates shared preferences', async () => {
+  const { mod, state } = await loadPlugin()
+  const page = state.contributions.find(item => item.area === 'routes').render()
+  const switches = findNodes(page, node => node.type === 'sdk-switch')
+
+  assert.equal(switches.length, 3)
+  assert.deepEqual(switches.map(node => node.props.checked), [false, false, false])
+  assert.deepEqual(switches.map(node => node.props['aria-label']), ['Claude', 'GPT', 'GLM / Z.ai'])
+
+  switches[0].props.onCheckedChange(true)
+  assert.equal(mod.gaugePreferencesForScope(mod.statusGaugePreferencesAtom.get(), 'connection-a', 'angel').anthropic, true)
+  assert.equal(state.stored.get('statusGaugePreferences.v1').version, 1)
 })
 
 test('adapts staggered legacy backend payloads to English during hot reload', async () => {

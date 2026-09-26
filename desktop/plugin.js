@@ -1,10 +1,52 @@
 import { jsx as h, jsxs } from 'react/jsx-runtime'
 import { useState, useEffect, useMemo } from 'react'
-import { host, useValue, useQuery, useQueryClient, usePluginI18n, useI18n, Button, Input, Codicon, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tabs, TabsList, TabsTrigger, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
+import { host, atom, useValue, useQuery, useQueryClient, usePluginI18n, useI18n, Button, Switch, Input, Codicon, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tabs, TabsList, TabsTrigger, Popover, PopoverTrigger, PopoverContent, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA, STATUSBAR_AREAS } from '@hermes/plugin-sdk'
 
 const ID = 'provider-limits'
 const PATH = '/provider-limits'
 const ALL_MODELS = '__provider_limits_all_models__'
+const PREFS_VERSION = 1
+const PREFS_STORAGE_KEY = 'statusGaugePreferences.v1'
+const GAUGE_PROVIDER_IDS = Object.freeze(['anthropic', 'openai-codex', 'zai'])
+export const DEFAULT_GAUGES = Object.freeze({ anthropic: false, 'openai-codex': false, zai: false })
+export const statusGaugePreferencesAtom = atom({ version: PREFS_VERSION, scopes: {} })
+let preferencesRegistration = null
+
+const preferenceScopeKey = (connection, profile) => JSON.stringify([connection, profile])
+const cleanGaugeScope = value => Object.fromEntries(GAUGE_PROVIDER_IDS.map(id => [id, value?.[id] === true]))
+
+export function parseGaugePreferences(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.version !== PREFS_VERSION ||
+      !raw.scopes || typeof raw.scopes !== 'object' || Array.isArray(raw.scopes)) {
+    return { version: PREFS_VERSION, scopes: {} }
+  }
+  return {
+    version: PREFS_VERSION,
+    scopes: Object.fromEntries(Object.entries(raw.scopes)
+      .filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value))
+      .map(([key, value]) => [key, cleanGaugeScope(value)]))
+  }
+}
+
+export function gaugePreferencesForScope(preferences, connection, profile) {
+  return cleanGaugeScope(preferences?.scopes?.[preferenceScopeKey(connection, profile)])
+}
+
+export function updateGaugePreference(preferences, connection, profile, providerId, enabled) {
+  if (!GAUGE_PROVIDER_IDS.includes(providerId)) return preferences
+  const parsed = parseGaugePreferences(preferences)
+  const key = preferenceScopeKey(connection, profile)
+  return {
+    version: PREFS_VERSION,
+    scopes: { ...parsed.scopes, [key]: { ...gaugePreferencesForScope(parsed, connection, profile), [providerId]: enabled === true } }
+  }
+}
+
+export function setGaugePreference(connection, profile, providerId, enabled) {
+  const next = updateGaugePreference(statusGaugePreferencesAtom.get(), connection, profile, providerId, enabled)
+  statusGaugePreferencesAtom.set(next)
+  preferencesRegistration?.storage?.set(PREFS_STORAGE_KEY, next)
+}
 
 export const LOCALES = {
   en: {
@@ -15,6 +57,36 @@ export const LOCALES = {
     nav: { usage: 'Usage' },
     command: { open: 'Open usage and limits' },
     action: { refresh: 'Refresh', refreshing: 'Refreshing…' },
+    statusBar: {
+      title: 'Status bar',
+      description: 'Choose which compact quota summaries appear at the bottom of Hermes. These choices are saved separately for each connection and profile.',
+      defaultOff: 'New profiles start with every gauge off. Turning a gauge off hides it; the full Usage page remains available.',
+      provider: {
+        anthropic: 'Claude',
+        'openai-codex': 'GPT',
+        zai: 'GLM / Z.ai'
+      },
+      backendUnavailable: 'Usage backend unavailable for this connection and profile.',
+      usageTitle: provider => `${provider} usage`,
+      weekly: 'Weekly window',
+      weeklyShort: '7d',
+      fiveHour: '5-hour window',
+      unavailable: 'Usage unavailable',
+      used: percent => `${percent} used`,
+      lastKnownUsed: percent => `${percent} last known used`,
+      paceAria: (label, used, allowance) => `${label}: ${used} used, ${allowance} pace allowance`,
+      usedAria: (label, used) => `${label}: ${used} used; pace unavailable`,
+      resetIn: value => `Resets in ${value}`,
+      nextRefreshIn: value => `Next quota refresh in ${value}`,
+      resetUnknown: 'Reset time unavailable',
+      resetPending: 'Reset pending',
+      freshness: { fresh: 'Fresh', stale: 'Stale', unavailable: 'Unavailable' },
+      checkedAgo: value => `checked ${value} ago`,
+      cachedAgo: value => `last good reading ${value} ago`,
+      refreshEligible: value => `Refresh eligible in ${value}`,
+      legend: { used: 'used', paceRoom: 'pace room', overPace: 'over pace' },
+      provenance: (profile, connection) => `Profile ${profile} · connection ${connection ?? 'local'}`
+    },
     page: {
       subtitle: 'Account quotas and Hermes usage, session by session.',
       profile: profile => `Profile ${profile}`,
@@ -192,6 +264,7 @@ function useLocaleTools() {
     number: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }),
     percent: new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }),
     dateTime: new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }),
+    statusDateTime: new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'long' }),
     usd: new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD', maximumFractionDigits: 4 })
   }), [locale, t])
 }
@@ -358,6 +431,48 @@ export function resetText(value, tools, now = Date.now()) {
   return tools.t('quota.resetIn', duration)
 }
 
+export function validateQuotaResponse(data, profile) {
+  if (!data || data.schema_version !== 3 || !Array.isArray(data.providers)) {
+    throw new Error('INVALID_RESPONSE')
+  }
+  const identity = data.profile_identity
+  if (data.profile !== profile || identity?.name !== profile ||
+      typeof identity.id !== 'string' || !/^[a-f0-9]{64}$/.test(identity.id)) {
+    throw new Error('PROFILE_MISMATCH')
+  }
+}
+
+const isBackendUnavailableError = error => /404|not found/i.test(String(error))
+const isHardQuotaError = error => [401, 403].includes(error?.status) ||
+  /\b401\b|\b403\b|unauthorized|forbidden|PROFILE_MISMATCH|INVALID_RESPONSE/i.test(String(error))
+
+export function quotaQueryOptions(ctx, connection, profile, enabled = true) {
+  const queryKey = ['provider-limits', 3, connection, profile]
+  return {
+    queryKey,
+    queryFn: async ({ client } = {}) => {
+      try {
+        const data = await ctx.rest(`/quota?profile=${encodeURIComponent(profile)}`, {
+          method: 'GET', timeoutMs: 55_000
+        })
+        validateQuotaResponse(data, profile)
+        return data
+      } catch (error) {
+        // Revoke the shared cache itself, not just one observer's render. A
+        // later transport failure must not resurrect an unauthorized snapshot.
+        if (isHardQuotaError(error) || isBackendUnavailableError(error)) client?.setQueryData(queryKey, null)
+        throw error
+      }
+    },
+    enabled,
+    staleTime: 60_000,
+    refetchInterval: query => isBackendUnavailableError(query.state.error) ? false : 60_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    retry: (failureCount, error) => !isBackendUnavailableError(error) && !isHardQuotaError(error) && failureCount < 2
+  }
+}
+
 export const CSS = `
 .pl-page{height:100%;overflow:auto;container-type:inline-size;color:var(--ui-text-primary);font:inherit;scrollbar-color:var(--ui-stroke-primary) transparent}
 .pl-content{padding:clamp(20px,4vw,48px);max-width:1160px;margin:0 auto}
@@ -401,6 +516,7 @@ export const CSS = `
 .pl-loading{padding:32px 0;color:var(--ui-text-secondary);font-size:13px}
 .pl-loading-lines{display:grid;gap:18px;margin-top:24px}.pl-loading-lines span{display:block;height:8px;background:var(--ui-bg-quaternary);border-radius:3px;width:100%}
 .pl-footer{border-top:1px solid var(--ui-stroke-tertiary);padding-top:20px;font-size:11px;line-height:1.7;color:var(--ui-text-tertiary);max-width:75ch}
+.pl-gauge-settings{border-top:1px solid var(--ui-stroke-tertiary);padding:24px 0 28px}.pl-gauge-settings h2{font-size:19px;font-weight:600;margin:0 0 7px}.pl-gauge-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:18px}.pl-gauge-option{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--ui-stroke-tertiary);border-radius:6px;font-size:12px}.pl-gauge-note{margin:12px 0 0;color:var(--ui-text-tertiary);font-size:11px;line-height:1.5}
 .pl-details{margin-top:12px;color:var(--ui-text-secondary);font-size:12px}.pl-details summary{cursor:pointer;padding:4px 0;list-style-position:inside}.pl-details dl{margin:8px 0;display:grid;gap:9px}.pl-details .pl-fact{display:flex;gap:16px;justify-content:space-between}.pl-details dt{margin:0}
 .pl-page :focus-visible{outline:2px solid var(--ui-accent);outline-offset:4px;border-radius:3px}
 .pl-page ::selection{background:var(--ui-accent);color:var(--ui-bg-primary)}
@@ -435,8 +551,13 @@ export const CSS = `
 .pl-pagination{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap;font-size:12px;color:var(--ui-text-secondary)}
 .pl-pagination-actions{display:flex;gap:8px}.pl-model-summary{margin:20px 0}
 .pl-history-warning{font-size:12px;color:var(--ui-text-secondary);padding:12px 0;line-height:1.7}
-@container (max-width:550px){.pl-content{padding:22px 20px}.pl-meta{padding-bottom:16px}.pl-section-head{align-items:flex-start}.pl-section{padding-top:24px}.pl-windows{grid-template-columns:1fr;gap:26px}.pl-status{font-size:11px}.pl-rest{font-size:21px}}
+@container (max-width:550px){.pl-content{padding:22px 20px}.pl-meta{padding-bottom:16px}.pl-section-head{align-items:flex-start}.pl-section{padding-top:24px}.pl-windows{grid-template-columns:1fr;gap:26px}.pl-gauge-grid{grid-template-columns:1fr}.pl-status{font-size:11px}.pl-rest{font-size:21px}}
 @media(prefers-reduced-motion:reduce){.pl-fill{transition:none}}
+`
+
+export const STATUS_CSS = `
+.pl-status-resets{border-block:1px solid var(--ui-stroke-secondary);padding:10px 0;margin:16px 0 10px}.pl-status-resets .pl-fact{display:flex;justify-content:space-between;gap:14px}.pl-status-resets dt{margin:0;color:var(--ui-text-secondary)}.pl-status-resets dd{margin:0;font-weight:550;font-variant-numeric:tabular-nums}
+.pl-status-gauges{display:flex;height:100%;align-items:center;min-width:80px;max-width:100%;flex:0 1 calc(var(--pl-gauge-count) * 180px);container-type:inline-size}.pl-status-compact{display:none;align-items:center;height:100%;padding:0 6px;font-size:11px;white-space:nowrap;color:var(--ui-text-tertiary)}@media(max-width:650px){.pl-status-gauges [data-provider-chip]{display:none}.pl-status-compact{display:inline-flex}}@container(max-width:179px){.pl-status-gauges[data-gauge-count="1"] [data-provider-chip]{display:none}.pl-status-gauges[data-gauge-count="1"] .pl-status-compact{display:inline-flex}}@container(max-width:359px){.pl-status-gauges[data-gauge-count="2"] [data-provider-chip]{display:none}.pl-status-gauges[data-gauge-count="2"] .pl-status-compact{display:inline-flex}}@container(max-width:539px){.pl-status-gauges[data-gauge-count="3"] [data-provider-chip]{display:none}.pl-status-gauges[data-gauge-count="3"] .pl-status-compact{display:inline-flex}}.pl-status-popover{width:288px;max-width:calc(100vw - 24px);padding:12px;font-size:12px}.pl-status-popover-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.pl-status-popover-head h3{font-size:12px;font-weight:600;margin:0}.pl-status-popover-head span{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window-list{display:grid;gap:14px}.pl-status-window{display:grid;gap:6px}.pl-status-window-head{display:flex;justify-content:space-between;gap:10px}.pl-status-window-head>:last-child{font-variant-numeric:tabular-nums}.pl-status-chip-value[data-level=caution]{color:var(--ui-yellow)}.pl-status-chip-value[data-level=warning]{color:var(--ui-orange)}.pl-status-chip-value[data-level=critical]{color:var(--ui-red)}.pl-status-chip-pace{color:var(--ui-text-quaternary);font-weight:400}.pl-pace-value{color:var(--ui-yellow);font-weight:500;margin-left:6px}.pl-pace-track{display:flex;height:7px;overflow:hidden;border-radius:4px;background:var(--ui-stroke-secondary)}.pl-pace-track i{height:100%}.pl-pace-track [data-segment=used]{background:var(--ui-text-secondary)}.pl-pace-track [data-segment=pace-room]{background:var(--ui-yellow)}.pl-pace-track [data-segment=over-pace]{background:var(--ui-orange)}.pl-status-reset,.pl-status-window time,.pl-status-freshness,.pl-status-provenance{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window time{color:var(--ui-text-quaternary)}.pl-pace-legend{display:flex;gap:12px;margin:14px 0;color:var(--ui-text-tertiary);font-size:10px}.pl-pace-legend i{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:4px}.pl-pace-legend [data-legend=used]{background:var(--ui-text-secondary)}.pl-pace-legend [data-legend=paceRoom]{background:var(--ui-yellow)}.pl-pace-legend [data-legend=overPace]{background:var(--ui-orange)}.pl-status-freshness{margin-bottom:8px}.pl-status-provenance{margin-top:8px;color:var(--ui-text-quaternary);font-size:10px}
 `
 
 function Fact({ fact, tools, inheritedUnitCode, inheritedUnit, inheritedCurrencyCode }) {
@@ -645,6 +766,272 @@ function UsageHistory({ ctx, provider, profile, connection, tools }) {
   ] })
 }
 
+const FIVE_HOURS = 18_000
+const SEVEN_DAYS = 604_800
+const clampPercent = value => Math.max(0, Math.min(100, value))
+const roundPercent = value => Math.round(clampPercent(value))
+const statusPercent = (value, tools) => tools.percent.format(roundPercent(value) / 100)
+
+export function selectProviderWindows(provider) {
+  const windows = Array.isArray(provider?.windows) ? provider.windows : []
+  let relevant
+  let weeklyMatches
+  if (provider?.id === 'anthropic') {
+    relevant = windows.filter(item =>
+      (item.id === 'five_hour' && item.period_seconds === FIVE_HOURS) ||
+      (item.id === 'seven_day' && item.period_seconds === SEVEN_DAYS) ||
+      (item.id?.startsWith('weekly_scoped_') && item.period_seconds === SEVEN_DAYS))
+    weeklyMatches = relevant.filter(item => item.id === 'seven_day' && item.period_seconds === SEVEN_DAYS)
+  } else if (provider?.id === 'openai-codex') {
+    relevant = windows.filter(item => item.group === 'Codex')
+    weeklyMatches = relevant.filter(item => item.period_seconds === SEVEN_DAYS)
+  } else if (provider?.id === 'zai') {
+    relevant = windows.filter(item => item.unit_code === 'token')
+    weeklyMatches = relevant.filter(item => item.period_seconds === SEVEN_DAYS)
+  } else {
+    relevant = []
+    weeklyMatches = []
+  }
+  relevant = [...relevant].sort((a, b) => (a.period_seconds || Infinity) - (b.period_seconds || Infinity))
+  return { weekly: weeklyMatches.length === 1 ? weeklyMatches[0] : null, relevant }
+}
+
+export function quotaPaceState(window, providerStatus = 'ok', now = Date.now()) {
+  const used = numeric(window?.used_percent)
+  const periodSeconds = numeric(window?.period_seconds)
+  const resetAt = Date.parse(window?.reset_at || '')
+  const base = { used, allowance: null, projection: null, level: 'normal', resetAt: Number.isFinite(resetAt) ? resetAt : null }
+  if (used === null || periodSeconds === null || periodSeconds <= 0 || !Number.isFinite(resetAt) ||
+      resetAt <= now || window?.rolling === true || providerStatus !== 'ok') return base
+  const elapsed = 1 - ((resetAt - now) / (periodSeconds * 1000))
+  if (elapsed <= 0.020000001 || elapsed > 1) return base
+  const allowance = Math.round(clampPercent(elapsed * 100))
+  const projection = Math.round(used / elapsed)
+  const level = projection >= 150 ? 'critical' : projection >= 125 ? 'warning' : projection > 100 ? 'caution' : 'normal'
+  return { ...base, allowance, projection, level }
+}
+
+export function paceSegments(usedValue, allowanceValue) {
+  const used = clampPercent(numeric(usedValue) ?? 0)
+  const allowance = clampPercent(numeric(allowanceValue) ?? 0)
+  return {
+    used: Math.min(used, allowance),
+    paceRoom: Math.max(0, allowance - used),
+    overPace: Math.max(0, used - allowance),
+    remaining: Math.max(0, 100 - Math.max(used, allowance))
+  }
+}
+
+const compactQuotaBar = value => {
+  const cells = Math.round(clampPercent(value) / 10)
+  return `[${'█'.repeat(cells)}${'░'.repeat(10 - cells)}]`
+}
+const compactDuration = (seconds, tools) => {
+  const total = Math.max(0, Math.floor(seconds))
+  const part = (value, unit) => tools.t('duration.short', tools.number.format(value), unit, value)
+  if (total >= 86400) return `${part(Math.floor(total / 86400), 'day')} ${part(Math.floor((total % 86400) / 3600), 'hour')}`
+  if (total >= 3600) return `${part(Math.floor(total / 3600), 'hour')} ${part(Math.floor((total % 3600) / 60), 'minute')}`
+  if (total >= 60) return part(Math.floor(total / 60), 'minute')
+  return part(total, 'second')
+}
+
+export function effectiveProviderAge(provider, now = Date.now(), dataUpdatedAt) {
+  const reportedAge = numeric(provider?.age_seconds)
+  const sinceReceipt = Number.isFinite(dataUpdatedAt) && dataUpdatedAt > 0
+    ? Math.max(0, (now - dataUpdatedAt) / 1000) : 0
+  const reported = reportedAge === null ? null : reportedAge + sinceReceipt
+  const fetchedAt = Date.parse(provider?.fetched_at || '')
+  const elapsed = Number.isFinite(fetchedAt) ? Math.max(0, (now - fetchedAt) / 1000) : null
+  if (reported === null) return elapsed
+  if (elapsed === null) return reported
+  return Math.max(reported, elapsed)
+}
+
+const MAX_QUOTA_AGE_SECONDS = 900
+
+function providerForDisplay(provider, interrupted, now, dataUpdatedAt) {
+  if (!['ok', 'stale'].includes(provider.status)) return provider
+  const age = effectiveProviderAge(provider, now, dataUpdatedAt)
+  if (age > MAX_QUOTA_AGE_SECONDS || (age === null && interrupted)) return {
+    ...provider, status: 'unavailable', windows: [], facts: [], plan: null, plan_display: null,
+    age_seconds: age, problem: { code: 'provider.fetchFailed', params: {}, retryable: true }
+  }
+  return { ...provider, status: interrupted ? 'stale' : provider.status, age_seconds: age }
+}
+
+function useQuotaProviders(query, enabled = true) {
+  const [revision, setRevision] = useState(0)
+  // A paused observer need not emit again. Expire its display at the age
+  // ceiling even while offline; this timeout never fetches or mutates cache.
+  useEffect(() => {
+    if (!enabled) return
+    const now = Date.now()
+    const delays = (query.data?.providers || []).flatMap(provider => {
+      if (!['ok', 'stale'].includes(provider.status)) return []
+      const age = effectiveProviderAge(provider, now, query.dataUpdatedAt)
+      return age !== null && age <= MAX_QUOTA_AGE_SECONDS
+        ? [Math.max(1, Math.ceil((MAX_QUOTA_AGE_SECONDS - age) * 1000) + 1)] : []
+    })
+    if (!delays.length) return
+    const timer = setTimeout(() => setRevision(value => value + 1), Math.min(...delays))
+    return () => clearTimeout(timer)
+  }, [query.data, query.dataUpdatedAt, enabled, revision])
+  const now = Date.now()
+  const interrupted = Boolean(query.error) || query.fetchStatus === 'paused'
+  return (query.data?.providers || []).map(provider => providerForDisplay(provider, interrupted, now, query.dataUpdatedAt))
+}
+
+const statusWindowLabel = (window, tools) => window.id?.startsWith('weekly_scoped_')
+  ? displayText(window.display?.label, window.label, tools, 'window')
+  : window.period_seconds === FIVE_HOURS
+  ? tools.t('statusBar.fiveHour')
+  : window.period_seconds === SEVEN_DAYS ? tools.t('statusBar.weekly') : displayText(window.display?.label, window.label, tools, 'window')
+
+function PaceBar({ state, label, tools }) {
+  const used = clampPercent(state.used ?? 0)
+  const segments = state.allowance === null ? { used, paceRoom: 0, overPace: 0, remaining: 100 - used } : paceSegments(used, state.allowance)
+  const usedText = statusPercent(used, tools)
+  const aria = state.allowance === null
+    ? tools.t('statusBar.usedAria', label, usedText)
+    : tools.t('statusBar.paceAria', label, usedText, statusPercent(state.allowance, tools))
+  return h('div', { className: 'pl-pace-track', role: 'progressbar', 'aria-label': aria,
+    'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': used,
+    children: Object.entries(segments).map(([name, width]) => width > 0 && h('i', {
+      'data-segment': name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`),
+      style: { width: `${width}%` }
+    }, name)) })
+}
+
+function StatusWindow({ window, provider, tools, now }) {
+  const state = quotaPaceState(window, provider.status, now)
+  const label = statusWindowLabel(window, tools)
+  const used = state.used === null ? null : roundPercent(state.used)
+  const usedText = used === null ? null : statusPercent(used, tools)
+  const resetText = state.resetAt === null ? tools.t('statusBar.resetUnknown')
+    : state.resetAt <= now ? tools.t('statusBar.resetPending')
+      : tools.t(window.rolling === true ? 'statusBar.nextRefreshIn' : 'statusBar.resetIn', compactDuration((state.resetAt - now) / 1000, tools))
+  return jsxs('section', { className: 'pl-status-window', children: [
+    jsxs('div', { className: 'pl-status-window-head', children: [
+      h('span', { children: label }),
+      used === null ? h('span', { children: tools.t('statusBar.unavailable') }) : jsxs('span', { children: [
+        provider.status === 'stale' ? tools.t('statusBar.lastKnownUsed', usedText) : tools.t('statusBar.used', usedText),
+        state.allowance !== null && h('b', { className: 'pl-pace-value', children: `[${statusPercent(state.allowance, tools)}]` })
+      ] })
+    ] }),
+    used !== null && h(PaceBar, { state, label, tools }),
+    h('div', { className: 'pl-status-reset', children: resetText }),
+    state.resetAt !== null && h('time', { dateTime: new Date(state.resetAt).toISOString(), children: tools.statusDateTime.format(new Date(state.resetAt)) })
+  ] })
+}
+
+function ProviderGauge({ provider, query, profile, connection, tools, transportError = false }) {
+  const now = Date.now()
+  const { weekly, relevant } = selectProviderWindows(provider)
+  const weeklyState = weekly ? quotaPaceState(weekly, provider.status, now) : null
+  const used = weeklyState?.used === null || weeklyState?.used === undefined ? null : roundPercent(weeklyState.used)
+  const usedText = used === null ? null : statusPercent(used, tools)
+  const providerLabel = tools.t(`statusBar.provider.${provider.id}`)
+  const title = tools.t('statusBar.usageTitle', providerLabel)
+  const nextRefresh = Date.parse(provider.next_refresh_at || '')
+  const cooldown = Number.isFinite(nextRefresh) ? Math.max(0, (nextRefresh - now) / 1000) : 0
+  const refreshDisabled = query.isFetching || cooldown > 0
+  const age = effectiveProviderAge(provider, now)
+  const baseFreshness = provider.status === 'stale'
+    ? `${tools.t('statusBar.freshness.stale')} · ${tools.t('statusBar.cachedAgo', compactDuration(age ?? 0, tools))}`
+    : provider.status === 'ok'
+      ? `${tools.t('statusBar.freshness.fresh')} · ${tools.t('statusBar.checkedAgo', compactDuration(age ?? 0, tools))}`
+      : tools.t('statusBar.freshness.unavailable')
+  const providerIssue = provider.problem || provider.error ? localizedError(provider.problem, provider.error, tools) : null
+  const issue = providerIssue || (transportError ? tools.t('error.refreshBody') : null)
+  const freshness = issue ? `${baseFreshness} · ${issue}` : baseFreshness
+  const resetFact = ['ok', 'stale'].includes(provider.status) ? provider.facts?.find(fact =>
+    (fact.display?.label || legacyDescriptor(fact.label, 'factLabel'))?.code === 'fact.availableResets') : null
+  const resets = Number.isSafeInteger(resetFact?.value) && resetFact.value >= 0 ? resetFact.value : null
+  return h(Popover, { children: [
+    h(PopoverTrigger, { asChild: true, children: h('button', {
+      type: 'button', 'aria-label': title, 'data-provider-chip': provider.id,
+      className: 'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+      children: used === null
+        ? `${providerLabel} · ${tools.t('statusBar.unavailable')}`
+        : [
+            h('span', { className: 'text-(--ui-text-tertiary)', children: `${providerLabel} · ${tools.t('statusBar.weeklyShort')}` }),
+            h('span', { className: 'tabular-nums pl-status-chip-value', 'data-level': weeklyState.level, children: `${compactQuotaBar(used)} ${usedText}` }),
+            weeklyState.allowance !== null && h('span', { className: 'pl-status-chip-pace', children: `[${statusPercent(weeklyState.allowance, tools)}]` }),
+            provider.status === 'stale' && h('span', { className: 'text-(--ui-text-quaternary)', children: '∗' })
+          ]
+    }) }),
+    h(PopoverContent, { side: 'top', align: 'end', 'aria-label': title, className: 'pl-status-popover', children: [
+      jsxs('div', { className: 'pl-status-popover-head', children: [h('h3', { children: title }), provider.plan && h('span', { children: provider.plan })] }),
+      relevant.length ? h('div', { className: 'pl-status-window-list', children: relevant.map(window => h(StatusWindow, { window, provider, tools, now }, `${window.id}:${window.period_seconds}`)) }) : h('p', { children: tools.t('statusBar.unavailable') }),
+      h('div', { className: 'pl-pace-legend', children: ['used', 'paceRoom', 'overPace'].map(name => jsxs('span', { children: [h('i', { 'data-legend': name }), tools.t(`statusBar.legend.${name}`)] }, name)) }),
+      ['anthropic', 'openai-codex'].includes(provider.id) && h('dl', { className: 'pl-status-resets', children: h(Fact, {
+        tools, fact: { value: resets, display: {
+          label: { kind: 'message', code: 'fact.availableResets' },
+          ...(resets === null ? { value: { kind: 'message', code: 'value.notIndicated' } } : {})
+        } }
+      }) }),
+      h('div', { className: 'pl-status-freshness', children: freshness }),
+      h(Button, { variant: 'secondary', size: 'sm', disabled: refreshDisabled, onClick: () => { if (!refreshDisabled) query.refetch() }, children: query.isFetching ? tools.t('action.refreshing') : cooldown > 0 ? tools.t('statusBar.refreshEligible', compactDuration(cooldown, tools)) : tools.t('action.refresh') }),
+      h('div', { className: 'pl-status-provenance', children: tools.t('statusBar.provenance', profile, connection) })
+    ] })
+  ] })
+}
+
+export function StatusGaugeRoot({ ctx }) {
+  const tools = useLocaleTools()
+  const profile = useValue(host.state.profile) || 'default'
+  const hasConnectionState = Boolean(host.state.connectionId)
+  const connectionValue = useValue(host.state.connectionId || host.state.profile)
+  const connection = hasConnectionState ? connectionValue : null
+  const preferences = useValue(statusGaugePreferencesAtom)
+  const scoped = gaugePreferencesForScope(preferences, connection, profile)
+  const enabledIds = GAUGE_PROVIDER_IDS.filter(id => scoped[id])
+  const query = useQuery(quotaQueryOptions(ctx, connection, profile, enabledIds.length > 0))
+  const displayProviders = useQuotaProviders(query, enabledIds.length > 0)
+
+  if (!enabledIds.length) return null
+  if (query.error && isBackendUnavailableError(query.error)) {
+    return h('span', { role: 'status', children: tools.t('statusBar.backendUnavailable') })
+  }
+  if (query.data?.problem || query.data?.error) {
+    return h('span', { role: 'alert', children: localizedError(query.data.problem, query.data.error, tools) })
+  }
+  if (query.error && !query.data) {
+    return h('span', { role: 'alert', children: tools.t('error.refreshBody') })
+  }
+  const providers = new Map(displayProviders.map(item => [item.id, item]))
+  const chips = enabledIds.flatMap(providerId => {
+    const provider = providers.get(providerId)
+    if (!provider) return []
+    return [h(ProviderGauge, { provider, query, profile, connection, tools, transportError: Boolean(query.error) }, providerId)]
+  })
+  return chips.length ? h('div', { className: 'pl-status-gauges', 'data-gauge-count': chips.length,
+    style: { '--pl-gauge-count': chips.length }, children: [
+    h('style', { children: STATUS_CSS }),
+    h('button', { type: 'button', className: 'pl-status-compact',
+      'aria-label': tools.t('command.open'), onClick: () => host.navigate(PATH),
+      children: `${tools.t('nav.usage')} · ${enabledIds.length}` }),
+    ...chips
+  ] }) : null
+}
+
+function StatusGaugeSettings({ connection, profile, tools }) {
+  const preferences = useValue(statusGaugePreferencesAtom)
+  const scoped = gaugePreferencesForScope(preferences, connection, profile)
+  return jsxs('section', { className: 'pl-gauge-settings', 'aria-labelledby': 'pl-statusbar-title', children: [
+    h('h2', { id: 'pl-statusbar-title', children: tools.t('statusBar.title') }),
+    h('p', { className: 'pl-description', children: tools.t('statusBar.description') }),
+    h('div', { className: 'pl-gauge-grid', children: GAUGE_PROVIDER_IDS.map(providerId => {
+      const label = tools.t(`statusBar.provider.${providerId}`)
+      return jsxs('label', { className: 'pl-gauge-option', children: [
+        h('span', { children: label }),
+        h(Switch, { checked: scoped[providerId], 'aria-label': label, onCheckedChange: checked => setGaugePreference(connection, profile, providerId, checked) })
+      ] }, providerId)
+    }) }),
+    h('p', { className: 'pl-gauge-note', children: tools.t('statusBar.defaultOff') })
+  ] })
+}
+
 export function QuotaPage({ ctx }) {
   const tools = useLocaleTools()
   const t = tools.t
@@ -657,31 +1044,23 @@ export function QuotaPage({ ctx }) {
   const connection = hasConnectionState ? connectionValue : null
   const client = useQueryClient()
   const [preferred, setPreferred] = useState('')
-  const query = useQuery({
-    queryKey: ['provider-limits', 2, connection, profile],
-    queryFn: async () => {
-      const data = await ctx.rest(`/quota?profile=${encodeURIComponent(profile)}`, { method: 'GET', timeoutMs: 55000 })
-      if (!data || !Array.isArray(data.providers)) throw new Error('INVALID_RESPONSE')
-      return data
-    },
-    staleTime: 60000, refetchInterval: q => q.state.error ? false : 60000,
-    refetchIntervalInBackground: false, refetchOnWindowFocus: true, retry: false
-  })
-  const providers = query.data?.providers || []
+  const query = useQuery(quotaQueryOptions(ctx, connection, profile))
+  const providers = useQuotaProviders(query)
   const selected = providers.some(p => p.id === preferred) ? preferred : providers[0]?.id || ''
   const count = providers.reduce((n, p) => n + p.windows.length, 0)
   const refreshSeconds = query.data?.refresh_seconds || 60
   const refreshMinutes = Math.max(1, Math.round(refreshSeconds / 60))
-  const backendMissing = query.error && /404|not found/i.test(String(query.error))
+  const backendMissing = query.error && isBackendUnavailableError(query.error)
   return jsxs('div', { className: 'pl-page', children: [h('style', { children: CSS }), jsxs('div', { className: 'pl-content', children: [
     jsxs('header', { className: 'pl-header', children: [jsxs('div', { children: [h('h1', { children: t('meta.title') }), h('p', { className: 'pl-description', children: t('page.subtitle') })] }), jsxs(Button, { variant: 'secondary', size: 'sm', disabled: query.isFetching, onClick: () => { query.refetch(); client.invalidateQueries({ queryKey: ['provider-limits-history', 2, connection, profile] }) }, children: [h(Codicon, { name: 'refresh' }), query.isFetching ? t('action.refreshing') : t('action.refresh')] })] }),
     jsxs('div', { className: 'pl-meta', children: [jsxs('span', { className: 'pl-profile', children: [h(Codicon, { name: 'account' }), t('page.profile', profile)] }), query.data && h('span', { children: t('page.activeSummary', ...numberArguments(providers.length, tools), ...numberArguments(count, tools)) }), h('span', { children: t('page.autoRefresh', ...numberArguments(refreshMinutes, tools)) })] }),
+    h(StatusGaugeSettings, { connection, profile, tools }),
     query.isPending && h('div', { className: 'pl-loading', role: 'status', 'aria-live': 'polite', children: jsxs('div', { children: [t('page.loading'), h('div', { className: 'pl-loading-lines', 'aria-hidden': true, children: [h('span', {}), h('span', {}), h('span', {})] })] }) }),
     (query.error || query.data?.problem || query.data?.error) && jsxs('div', { className: 'pl-alert', role: 'alert', children: [h(Codicon, { name: 'info' }), jsxs('div', { children: [h('strong', { children: backendMissing ? t('error.backendMissingTitle') : t('error.refreshTitle') }), backendMissing ? t('error.backendMissingBody') : localizedError(query.data?.problem, query.data?.error || query.error, tools, 'error.refreshBody')] })] }),
     !query.isPending && !query.error && !query.data?.problem && !query.data?.error && providers.length === 0 && jsxs('div', { className: 'pl-empty', children: [h(Codicon, { name: 'plug' }), h('h2', { children: t('page.noProvidersTitle') }), h('p', { children: t('page.noProvidersBody') })] }),
     providers.length > 0 && jsxs(Tabs, { value: selected, onValueChange: setPreferred, children: [
       h(TabsList, { className: 'pl-tabs-list', 'aria-label': t('page.providersAria'), children: providers.map(p => h(TabsTrigger, { value: p.id, id: `pl-tab-${p.id}`, 'aria-controls': `pl-panel-${p.id}`, children: p.name }, p.id)) }),
-      ...providers.filter(p => p.id === selected).map(p => jsxs('div', { role: 'tabpanel', id: `pl-panel-${p.id}`, 'aria-labelledby': `pl-tab-${p.id}`, tabIndex: 0, children: [h(Provider, { provider: query.error ? { ...p, status: 'stale', problem: { code: 'provider.fetchFailed', params: {}, retryable: true } } : p, ctx, tools }), h(UsageHistory, { ctx, provider: p.id, profile, connection, tools }, `${connection}:${profile}:${p.id}`)] }, p.id))
+      ...providers.filter(p => p.id === selected).map(p => jsxs('div', { role: 'tabpanel', id: `pl-panel-${p.id}`, 'aria-labelledby': `pl-tab-${p.id}`, tabIndex: 0, children: [h(Provider, { provider: p, ctx, tools }), h(UsageHistory, { ctx, provider: p.id, profile, connection, tools }, `${connection}:${profile}:${p.id}`)] }, p.id))
     ] }),
     h('footer', { className: 'pl-footer', children: t('page.footer', ...numberArguments(refreshSeconds, tools)) })
   ] })] })
@@ -692,11 +1071,21 @@ export default {
   name: 'Usage and limits',
   description: 'Usage, remaining quota, and resets for active Hermes providers.',
   register(ctx) {
+    const registration = { storage: ctx.storage || null }
+    preferencesRegistration = registration
+    ctx.onDispose(() => {
+      // A late old disposer must not detach a newer activation, even when
+      // both contexts use the same storage adapter.
+      if (preferencesRegistration === registration) preferencesRegistration = null
+      registration.storage = null
+    })
+    statusGaugePreferencesAtom.set(parseGaugePreferences(ctx.storage?.get(PREFS_STORAGE_KEY, null)))
     ctx.i18n.register(LOCALES)
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PATH }, render: () => h(QuotaPage, { ctx }) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, order: 75, data: { path: PATH, label: ctx.i18n.t('nav.usage'), codicon: 'graph' } },
-      { id: 'open', area: PALETTE_AREA, data: { id: 'provider-limits.open', label: ctx.i18n.t('command.open'), keywords: ['quota', 'codex', 'spark', 'claude', 'deepseek', 'glm', 'zai'], run: () => host.navigate(PATH) } }
+      { id: 'open', area: PALETTE_AREA, data: { id: 'provider-limits.open', label: ctx.i18n.t('command.open'), keywords: ['quota', 'codex', 'spark', 'claude', 'deepseek', 'glm', 'zai'], run: () => host.navigate(PATH) } },
+      { id: 'status-gauges', area: STATUSBAR_AREAS.right, order: 90, render: () => h(StatusGaugeRoot, { ctx }) }
     ])
   }
 }

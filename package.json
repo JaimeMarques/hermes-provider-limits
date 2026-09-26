@@ -6,11 +6,16 @@
   },
   "scripts": {
     "test": "npm run test:desktop && npm run test:styles",
-    "test:desktop": "node --experimental-vm-modules --test tests/test_desktop_selects.cjs",
+    "test:desktop": "node --experimental-vm-modules --test tests/test_desktop_i18n.mjs tests/test_desktop_preferences.mjs tests/test_desktop_query.mjs tests/test_desktop_selects.cjs tests/test_desktop_statusbar.mjs tests/test_desktop_freshness.mjs",
     "test:styles": "node --test tests/test_select_styles.cjs",
     "install:chromium": "playwright install chromium"
   },
   "devDependencies": {
-    "playwright": "1.62.1"
+    "@tanstack/query-core": "5.101.2",
+    "@tanstack/react-query": "5.101.2",
+    "esbuild": "0.28.1",
+    "playwright": "1.62.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   }
 }
