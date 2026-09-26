@@ -77,18 +77,13 @@ def codex_singleton_tokens() -> dict:
 
 
 @contextmanager
-def _codex_refresh_guard(pool, credential: OwnedOAuth):
-    """Keep singleton validation and core's resync/POST/persist one transaction.
+def _owned_refresh_guard(pool, credential: OwnedOAuth):
+    """Pin the grant under core's refresh transaction locks through persistence.
 
-    try_refresh_matching identifies a row, not an immutable grant: released
-    Hermes can adopt a newly logged-in singleton inside that call. Take its
-    reentrant locks in core order (pool, profile auth, root fallback auth) and
-    hold them until refresh/persistence finishes. Never substitute an unlocked
-    precheck if this host no longer exposes the required locking capability.
+    An ID names a mutable row: core can adopt a different login with that ID
+    while handling an old 401. Recheck the authoritative pool row under the
+    same locks core uses before permitting its resync/POST/persist path.
     """
-    if credential.provider != "openai-codex":
-        yield
-        return
     from hermes_cli.auth import _auth_store_lock, _global_auth_file_path
 
     with ExitStack() as locks:
@@ -97,20 +92,44 @@ def _codex_refresh_guard(pool, credential: OwnedOAuth):
         root = _global_auth_file_path()
         if root is not None:
             locks.enter_context(_auth_store_lock(target_path=root))
-        try:
-            singleton = codex_singleton_tokens()
-        except Exception:
-            raise OAuthFailure("credentials.unreadable", hard=True) from None
         current = [entry for entry in pool.entries()
                    if getattr(entry, "id", None) == credential.credential_id
                    and getattr(entry, "source", None) == credential.source
                    and getattr(entry, "access_token", None) == credential.token]
         if len(current) != 1:
             raise OAuthFailure("account.changed", hard=True)
-        if singleton and (
-                singleton.get("access_token") != credential.token
-                or singleton.get("refresh_token") != current[0].refresh_token):
-            raise OAuthFailure("auth.ownedOAuthUnavailable", hard=True)
+        if credential.provider == "anthropic":
+            from agent.credential_pool import read_credential_pool
+            try:
+                persisted = [entry for entry in read_credential_pool("anthropic")
+                             if isinstance(entry, dict) and entry.get("id") == credential.credential_id]
+            except Exception:
+                raise OAuthFailure("credentials.unreadable", hard=True) from None
+            if (len(persisted) != 1 or persisted[0].get("source") != credential.source
+                    or persisted[0].get("access_token") != credential.token
+                    or persisted[0].get("refresh_token") != current[0].refresh_token):
+                raise OAuthFailure("account.changed", hard=True)
+            if credential.source == "hermes_pkce":
+                from hermes_constants import get_default_hermes_root, get_hermes_home
+                borrowed = credential.credential_id in getattr(pool, "_borrowed_root_ids", ())
+                home = get_default_hermes_root() if borrowed else get_hermes_home()
+                try:
+                    singleton = json.loads((home / ".anthropic_oauth.json").read_text())
+                except (OSError, ValueError):
+                    raise OAuthFailure("credentials.unreadable", hard=True) from None
+                if (not isinstance(singleton, dict)
+                        or singleton.get("accessToken") != credential.token
+                        or singleton.get("refreshToken") != current[0].refresh_token):
+                    raise OAuthFailure("account.changed", hard=True)
+        else:
+            try:
+                singleton = codex_singleton_tokens()
+            except Exception:
+                raise OAuthFailure("credentials.unreadable", hard=True) from None
+            if singleton and (
+                    singleton.get("access_token") != credential.token
+                    or singleton.get("refresh_token") != current[0].refresh_token):
+                raise OAuthFailure("auth.ownedOAuthUnavailable", hard=True)
         yield
 
 
@@ -225,7 +244,7 @@ def _refresh_owned(pool, credential: OwnedOAuth, now: float) -> OwnedOAuth:
     if _account_identity(credential.provider, credential.token) != credential.account_identity:
         raise OAuthFailure("account.changed", hard=True)
     try:
-        with _suppress_current_thread_refresh_logs(), _codex_refresh_guard(pool, credential):
+        with _suppress_current_thread_refresh_logs(), _owned_refresh_guard(pool, credential):
             updated = pool.try_refresh_matching(
                 api_key_hint=credential.token,
                 credential_id=credential.credential_id,

@@ -62,6 +62,135 @@ def probe_codex_login_change(api):
     return evidence
 
 
+def probe_anthropic_login_change(api):
+    """An in-flight 401 for A must never retry or display B under the same row ID."""
+    import hermes_cli.auth as auth
+
+    path = Path(os.environ['HERMES_HOME']) / 'auth.json'
+    source = 'manual:hermes_pkce'
+    first = {'id': 'owned', 'source': source, 'auth_type': 'oauth',
+             'priority': 0, 'access_token': 'A-token', 'refresh_token': 'A-refresh'}
+    path.write_text(json.dumps({'version': 1, 'credential_pool': {'anthropic': [first]}}))
+    requests = []
+    after_login = []
+
+    def transport(url, headers):
+        requests.append(headers['Authorization'])
+        if len(requests) == 1:
+            with auth._auth_store_lock():
+                store = json.loads(path.read_text())
+                store['credential_pool']['anthropic'][0].update(
+                    access_token='B-token', refresh_token='B-refresh')
+                path.write_text(json.dumps(store))
+                after_login.append(path.read_bytes())
+            raise api.QuotaError('synthetic unauthorized', status=401)
+        return {'seven_day': {'utilization': 19}}
+
+    import agent.anthropic_credentials as anthropic
+    with patch.object(api, 'get_json', side_effect=transport), patch.object(
+        anthropic, 'refresh_anthropic_oauth_pure', side_effect=AssertionError('refresh must not POST B')) as refresh:
+        try:
+            api.fetch_provider({'id': 'anthropic'})
+        except Exception as exc:
+            assert getattr(exc, 'hard', False) or getattr(exc, 'status', None) == 401
+        else:
+            raise AssertionError('replacement grant was accepted after A rejected')
+        assert requests == ['Bearer A-token'], requests
+        assert refresh.call_count == 0
+        assert path.read_bytes() == after_login[0]
+    path.unlink()
+    return ['anthropic:login-change-no-retry-or-write']
+
+
+def probe_anthropic_singleton_login_change(api):
+    """The hermes_pkce singleton can change while its pool row is still A."""
+    import hermes_cli.auth as auth
+    import agent.anthropic_credentials as anthropic
+
+    home = Path(os.environ['HERMES_HOME'])
+    pool_path = home / 'auth.json'
+    singleton_path = home / '.anthropic_oauth.json'
+    pool_path.write_text(json.dumps({'version': 1, 'credential_pool': {'anthropic': [{
+        'id': 'owned', 'source': 'hermes_pkce', 'auth_type': 'oauth', 'priority': 0,
+        'access_token': 'A-token', 'refresh_token': 'A-refresh',
+    }]}}))
+    singleton_path.write_text(json.dumps({'accessToken': 'A-token', 'refreshToken': 'A-refresh'}))
+    requests = []
+
+    def transport(url, headers):
+        requests.append(headers['Authorization'])
+        if len(requests) == 1:
+            with auth._auth_store_lock():
+                singleton_path.write_text(json.dumps({'accessToken': 'B-token', 'refreshToken': 'B-refresh'}))
+            raise api.QuotaError('synthetic unauthorized', status=401)
+        return {'seven_day': {'utilization': 19}}
+
+    with patch.object(api, 'get_json', side_effect=transport), patch.object(
+        anthropic, 'refresh_anthropic_oauth_pure', side_effect=AssertionError('must not refresh A after B login')
+    ) as refresh:
+        try:
+            api.fetch_provider({'id': 'anthropic'})
+        except Exception as exc:
+            assert getattr(exc, 'hard', False) or getattr(exc, 'status', None) == 401
+        else:
+            raise AssertionError('singleton replacement accepted after A rejected')
+        assert requests == ['Bearer A-token']
+        assert refresh.call_count == 0
+        assert json.loads(singleton_path.read_text())['accessToken'] == 'B-token'
+    pool_path.unlink()
+    singleton_path.unlink()
+    return ['anthropic:singleton-login-change-no-refresh-or-write']
+
+
+def probe_anthropic_borrowed_singleton_login_change(api):
+    """A named profile must compare the root's authoritative singleton, not its own."""
+    import hermes_cli.auth as auth
+    import agent.anthropic_credentials as anthropic
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    root = Path(os.environ['HERMES_HOME'])
+    named = root / 'profiles' / 'borrower'
+    named.mkdir(parents=True, exist_ok=True)
+    path = root / 'auth.json'
+    singleton = root / '.anthropic_oauth.json'
+    path.write_text(json.dumps({'version': 1, 'credential_pool': {'anthropic': [{
+        'id': 'owned', 'source': 'hermes_pkce', 'auth_type': 'oauth', 'priority': 0,
+        'access_token': 'A-token', 'refresh_token': 'A-refresh',
+    }]}}))
+    singleton.write_text(json.dumps({'accessToken': 'A-token', 'refreshToken': 'A-refresh'}))
+    scope = set_hermes_home_override(named)
+    requests = []
+
+    def transport(url, headers):
+        requests.append(headers['Authorization'])
+        if len(requests) == 1:
+            with auth._auth_store_lock(target_path=path):
+                singleton.write_text(json.dumps({'accessToken': 'B-token', 'refreshToken': 'B-refresh'}))
+            raise api.QuotaError('synthetic unauthorized', status=401)
+        return {'seven_day': {'utilization': 19}}
+
+    try:
+        with patch.object(api, 'get_json', side_effect=transport), patch.object(
+            anthropic, 'refresh_anthropic_oauth_pure', side_effect=AssertionError('borrowed grant must not POST')
+        ) as refresh:
+            try:
+                api.fetch_provider({'id': 'anthropic'})
+            except Exception as exc:
+                assert getattr(exc, 'hard', False) or getattr(exc, 'status', None) == 401
+            else:
+                raise AssertionError('borrowed singleton replacement accepted')
+            assert requests == ['Bearer A-token']
+            assert refresh.call_count == 0
+            assert json.loads(singleton.read_text())['accessToken'] == 'B-token'
+            assert not (named / '.anthropic_oauth.json').exists()
+    finally:
+        reset_hermes_home_override(scope)
+        path.unlink(missing_ok=True)
+        singleton.unlink(missing_ok=True)
+        (named / 'auth.json').unlink(missing_ok=True)
+    return ['anthropic:borrowed-singleton-login-change-no-write']
+
+
 def probe_codex_atomic_guard(api):
     """Try a real competing login immediately after the singleton was read.
 

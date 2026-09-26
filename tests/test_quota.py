@@ -68,6 +68,32 @@ def test_codex_reset_counts_are_nonnegative_safe_integers(count):
     assert [f['value'] for f in facts] == ([count] if type(count) is int and 0 <= count < 2**53 else [])
 
 
+def test_borrowed_root_login_change_invalidates_named_profile_quota(tmp_path, monkeypatch):
+    from hermes_constants import get_default_hermes_root
+
+    root = tmp_path / '.hermes'
+    profile = root / 'profiles' / 'named'
+    profile.mkdir(parents=True)
+    (root / 'auth.json').write_text('{"credential_pool":{"openai-codex":[{"access_token":"A"}]}}')
+    monkeypatch.setenv('HERMES_HOME', str(profile))
+    assert get_default_hermes_root() == root
+    api._quota_cache.clear()
+    reads = []
+    monkeypatch.setattr(api, 'fetch_provider', lambda provider: reads.append(provider) or {
+        'windows': [{'id': 'seven_day', 'used_percent': len(reads)}], 'facts': []
+    })
+    provider = {'id': 'openai-codex'}
+    first = api.cached_provider(provider, (str(profile), api._signature(profile)))
+    (root / 'auth.json').write_text('{"credential_pool":{"openai-codex":[{"access_token":"B"}]}}')
+    second = api.cached_provider(provider, (str(profile), api._signature(profile)))
+    assert first['windows'][0]['used_percent'] == 1
+    assert second['windows'][0]['used_percent'] == 2
+    (root / '.anthropic_oauth.json').write_text('{"access_token":"new-root-claude-login"}')
+    third = api.cached_provider(provider, (str(profile), api._signature(profile)))
+    assert third['windows'][0]['used_percent'] == 3
+    assert len(reads) == 3
+
+
 @pytest.mark.parametrize('block', [None, [], 'bad', 4, {}])
 def test_codex_unknown_reset_block_preserves_quota(block):
     result = api.normalize_codex({'rate_limit_reset_credits': block,

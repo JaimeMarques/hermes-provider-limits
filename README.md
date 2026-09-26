@@ -29,10 +29,12 @@ hiding one chip is not a provider-disable or account-change operation.
 
 Compact chips show only the unambiguous overall weekly window. Clicking opens a
 native popover with used quota, pace when meaningful, reset time, freshness,
-profile provenance, and a cooldown-aware Refresh button. Claude's popover also
-shows the 5-hour and provider-confirmed model-scoped weekly limits, including
-Fable. Structured names are not merged by display slug; malformed scoped rows
-cannot suppress valid overall quota. The opaque `nimbus_quill` codename is not
+profile provenance, and a cooldown-aware Refresh button. When the status-bar
+slot is too narrow (even in a wide window), it uses one **Usage** shortcut instead
+of clipping some provider chips; all quotas remain accessible on the Usage page.
+Claude's popover also shows the 5-hour and provider-confirmed model-scoped
+weekly limits, including Fable. Structured names are not merged by display slug;
+malformed scoped rows cannot suppress valid overall quota. The opaque `nimbus_quill` codename is not
 presented as a guessed model. Missing, rolling, expired, and stale reset/pace
 information is not presented as a fresh allowance.
 

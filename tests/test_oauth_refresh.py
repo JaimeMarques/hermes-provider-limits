@@ -4,6 +4,7 @@ from dataclasses import replace
 import importlib.util
 import json
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -54,6 +55,18 @@ class FakePool:
         self.refreshed = refreshed
         self.terminal = terminal
         self.refresh_calls = []
+        # The production guard re-reads the authoritative pool row. Keep this
+        # double's persisted row in sync with the selected grant it models.
+        home = Path(os.environ['HERMES_HOME'])
+        home.mkdir(parents=True, exist_ok=True)
+        (home / 'auth.json').write_text(json.dumps({
+            'version': 1, 'credential_pool': {selected.provider: [selected.to_dict()]}
+        }))
+        if selected.source == 'hermes_pkce':
+            (home / '.anthropic_oauth.json').write_text(json.dumps({
+                'accessToken': selected.access_token, 'refreshToken': selected.refresh_token,
+                'expiresAt': selected.expires_at_ms,
+            }))
 
     def select(self):
         return self.selected

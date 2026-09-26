@@ -653,9 +653,17 @@ def fetch_deepseek(token):
 def _signature(home):
     # Hash stays server-side, isolates cache on credential/config change.
     digest = hashlib.sha256()
-    for name in ("config.yaml", "auth.json", ".env", ".anthropic_oauth.json"):
-        path = home / name
+    from hermes_constants import get_default_hermes_root
+    paths = [home / name for name in ("config.yaml", "auth.json", ".env", ".anthropic_oauth.json")]
+    root = get_default_hermes_root()
+    if root.resolve() != home.resolve():
+        # Hermes can borrow the default profile's OAuth pool/auth singleton.
+        # A root login/logout must invalidate a named profile's cached quota
+        # even when nothing in that named profile's directory has changed.
+        paths.extend((root / "auth.json", root / ".anthropic_oauth.json"))
+    for path in paths:
         if path.is_file():
+            digest.update(str(path).encode())
             digest.update(path.read_bytes())
     from agent.secret_scope import current_secret_scope
     digest.update(json.dumps(dict(current_secret_scope() or {}), sort_keys=True).encode())

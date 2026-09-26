@@ -18,7 +18,7 @@ export const atom = initial => {
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn) } }
 }
 export const useValue = store => React.useSyncExternalStore(store.subscribe, store.get)
-export const host = { state: { profile: atom('angel'), connectionId: atom('local') }, navigate() {} }
+export const host = { state: { profile: atom('angel'), connectionId: atom('local') }, navigate(path) { window.navigatedTo = path } }
 export const ROUTES_AREA = 'routes', SIDEBAR_NAV_AREA = 'sidebar', PALETTE_AREA = 'palette'
 export const STATUSBAR_AREAS = { right: 'status-right' }
 export const bundles = {}
@@ -49,15 +49,17 @@ const ctx = {
   i18n: { register: values => Object.assign(bundles, values), t: key => key },
   registerMany: values => registrations.push(...values),
   onDispose: fn => disposers.push(fn),
-  storage: { get: () => ({ version: 1, scopes: { '["local","angel"]': { [window.fixtureOptions?.providerId ?? 'anthropic']: window.fixtureOptions?.enabled !== false } } }), set() {} },
+  storage: { get: () => ({ version: 1, scopes: { '["local","angel"]': Object.fromEntries(
+    (window.fixtureOptions?.providerIds ?? [window.fixtureOptions?.providerId ?? 'anthropic'])
+      .map(id => [id, window.fixtureOptions?.enabled !== false])) } }), set() {} },
   rest: async url => {
     if (!url.startsWith('/quota?')) return { sessions: [], models: [], total_sessions: 0, totals: { total_tokens: 0 } }
     calls++
     return { schema_version: 3, profile: 'angel', profile_identity: { name: 'angel', id: 'b'.repeat(64) },
-      refresh_seconds: 60, providers: [{ id: window.fixtureOptions?.providerId ?? 'anthropic', name: 'Fixture', status: 'ok',
+      refresh_seconds: 60, providers: (window.fixtureOptions?.providerIds ?? [window.fixtureOptions?.providerId ?? 'anthropic']).map(id => ({ id, name: 'Fixture', status: 'ok',
         fetched_at: window.fixtureOptions?.noFetchedAt ? null : new Date(Date.now() - age * 1000).toISOString(), age_seconds: age, facts: [{ value: 2, display: { label: { kind: 'message', code: 'fact.availableResets' } } }],
-        windows: [{ id: 'seven_day', group: window.fixtureOptions?.providerId === 'openai-codex' ? 'Codex' : 'Claude', label: 'Weekly', period_seconds: 604800,
-          used_percent: 27, reset_at: new Date(Date.now() + 86400000).toISOString() }] }] }
+        windows: [{ id: 'seven_day', group: id === 'openai-codex' ? 'Codex' : 'Claude', label: 'Weekly', period_seconds: 604800,
+          used_percent: 27, reset_at: new Date(Date.now() + 86400000).toISOString() }] })) }
   }
 }
 plugin.register(ctx)
@@ -89,12 +91,14 @@ async function browserFixture(t, options = {}) {
   })
   const browser = await chromium.launch({ headless: true })
   t.after(() => browser.close())
-  const page = await browser.newPage()
+  const page = await browser.newPage({ viewport: { width: options.viewportWidth ?? (options.narrow ? 420 : 1100), height: 720 } })
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.clock.install({ time: new Date('2026-09-20T12:00:00Z') })
   await page.clock.pauseAt(new Date('2026-09-20T12:00:00Z'))
-  await page.setContent('<div id="root"></div>')
+  await page.setContent(options.narrow
+    ? `<style>#root{display:flex;width:${(options.viewportWidth ?? 420) - 8}px;justify-content:space-between}#status-gauges{display:flex;width:${options.slotWidth ?? 160}px;min-width:0;overflow-x:clip;height:20px}button{cursor:pointer}</style><div id="root"></div>`
+    : '<div id="root"></div>')
   await page.evaluate(options => { window.fixtureOptions = options }, options)
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.clock.runFor(10)
@@ -172,6 +176,32 @@ test('already expired successful responses are unavailable even with an idle err
     assert.match(await page.locator(selector).innerText(), /Unavailable/i)
     assert.doesNotMatch(await page.locator(selector).innerText(), /27%/)
   }
+  await page.evaluate(() => fixture.unmount())
+})
+
+for (const viewportWidth of [420, 800]) {
+  test(`three gauges retain a visible route at a clipped 160px status slot (${viewportWidth}px viewport)`, async t => {
+    const page = await browserFixture(t, { narrow: true, viewportWidth, surfaces: ['status-gauges'],
+      providerIds: ['anthropic', 'openai-codex', 'zai'] })
+    assert.equal(await page.locator('[data-provider-chip]:visible').count(), 0)
+    const compact = page.locator('.pl-status-compact')
+    assert.equal(await compact.isVisible(), true)
+    assert.match(await compact.innerText(), /Usage · 3/)
+    const bounds = await compact.boundingBox()
+    const slot = await page.locator('#status-gauges').boundingBox()
+    assert.ok(bounds && slot && bounds.x >= slot.x && bounds.x + bounds.width <= slot.x + slot.width,
+      'fallback must fit the clipped host slot')
+    await compact.click()
+    assert.equal(await page.evaluate(() => window.navigatedTo), '/provider-limits')
+    await page.evaluate(() => fixture.unmount())
+  })
+}
+
+test('three gauges retain individual chips when the host grants enough status-bar width', async t => {
+  const page = await browserFixture(t, { narrow: true, viewportWidth: 1100, slotWidth: 620,
+    surfaces: ['status-gauges'], providerIds: ['anthropic', 'openai-codex', 'zai'] })
+  assert.equal(await page.locator('[data-provider-chip]:visible').count(), 3)
+  assert.equal(await page.locator('.pl-status-compact').isVisible(), false)
   await page.evaluate(() => fixture.unmount())
 })
 

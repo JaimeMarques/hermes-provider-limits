@@ -301,6 +301,15 @@ test('backend 404 renders the scoped unavailable state instead of provider data'
   assert.equal(walk(root).filter(node => node.props?.['data-provider-chip']).length, 0)
 })
 
+test('backend discovery problem remains visible when no provider rows were returned', async () => {
+  const result = { data: { ...quota, providers: [], problem: { code: 'credentials.unreadable' } },
+    error: null, isPending: false, isFetching: false, refetch() {} }
+  const { state } = await loadPlugin({ anthropic: true }, result, { localize: true })
+  const root = state.contributions.find(item => item.area === 'status-right').render()
+  assert.match(text(root), /credentials could not be read/)
+  assert.equal(walk(root).filter(node => node.props?.['data-provider-chip']).length, 0)
+})
+
 test('initial non-404 quota transport failure is visible and remains retryable', async () => {
   const error = new Error('connection refused')
   const result = { data: undefined, error, isPending: false, isFetching: false, refetch() {} }
