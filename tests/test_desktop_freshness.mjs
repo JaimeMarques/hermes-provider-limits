@@ -96,7 +96,13 @@ async function browserFixture(t, options = {}) {
   page.on('pageerror', error => errors.push(error.message))
   await page.clock.install({ time: new Date('2026-09-20T12:00:00Z') })
   await page.clock.pauseAt(new Date('2026-09-20T12:00:00Z'))
-  await page.setContent(options.narrow
+  await page.setContent(options.hostBar
+    // Mirrors the Desktop host (apps/desktop/src/app/shell/statusbar-controls.tsx):
+    // a `flex justify-between gap-2 px-1` footer whose clusters are content-sized
+    // `flex min-w-0 items-stretch gap-0.5 overflow-x-clip` rows with no width,
+    // and the plugin root mounted as a direct child of the right cluster.
+    ? `<style>body{margin:0}#bar{display:flex;height:20px;align-items:stretch;justify-content:space-between;gap:8px;padding:0 4px;width:${options.viewportWidth ?? 1300}px;box-sizing:border-box}#bar>div,#status-gauges{display:flex;min-width:0;align-items:stretch;gap:2px;overflow-x:clip}#left-items>span{flex:none;width:${options.hostBar.leftWidth ?? 240}px}button{cursor:pointer}</style><div id="bar"><div id="left-items"><span>left items</span></div><div id="root" style="display:contents"></div></div>`
+    : options.narrow
     ? `<style>#root{display:flex;width:${(options.viewportWidth ?? 420) - 8}px;justify-content:space-between}#status-gauges{display:flex;width:${options.slotWidth ?? 160}px;min-width:0;overflow-x:clip;height:20px}button{cursor:pointer}</style><div id="root"></div>`
     : '<div id="root"></div>')
   await page.evaluate(options => { window.fixtureOptions = options }, options)
@@ -202,6 +208,26 @@ test('three gauges retain individual chips when the host grants enough status-ba
     surfaces: ['status-gauges'], providerIds: ['anthropic', 'openai-codex', 'zai'] })
   assert.equal(await page.locator('[data-provider-chip]:visible').count(), 3)
   assert.equal(await page.locator('.pl-status-compact').isVisible(), false)
+  await page.evaluate(() => fixture.unmount())
+})
+
+test('two gauges show individual chips in a content-sized Desktop status-bar cluster', async t => {
+  const page = await browserFixture(t, { hostBar: {}, viewportWidth: 1300,
+    surfaces: ['status-gauges'], providerIds: ['anthropic', 'openai-codex'] })
+  assert.equal(await page.locator('[data-provider-chip]:visible').count(), 2)
+  assert.equal(await page.locator('.pl-status-compact').isVisible(), false)
+  const gauges = await page.locator('.pl-status-gauges').boundingBox()
+  assert.ok(gauges && gauges.width >= 360, `gauge root keeps its requested width (got ${gauges?.width})`)
+  await page.evaluate(() => fixture.unmount())
+})
+
+test('two gauges still fall back to the compact route when the Desktop status bar is crowded', async t => {
+  const page = await browserFixture(t, { hostBar: { leftWidth: 1150 }, viewportWidth: 1300,
+    surfaces: ['status-gauges'], providerIds: ['anthropic', 'openai-codex'] })
+  assert.equal(await page.locator('[data-provider-chip]:visible').count(), 0)
+  const compact = page.locator('.pl-status-compact')
+  assert.equal(await compact.isVisible(), true)
+  assert.match(await compact.innerText(), /Usage · 2/)
   await page.evaluate(() => fixture.unmount())
 })
 
