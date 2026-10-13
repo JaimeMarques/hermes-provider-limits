@@ -557,7 +557,8 @@ export const CSS = `
 
 export const STATUS_CSS = `
 .pl-status-resets{border-block:1px solid var(--ui-stroke-secondary);padding:10px 0;margin:16px 0 10px}.pl-status-resets .pl-fact{display:flex;justify-content:space-between;gap:14px}.pl-status-resets dt{margin:0;color:var(--ui-text-secondary)}.pl-status-resets dd{margin:0;font-weight:550;font-variant-numeric:tabular-nums}
-.pl-status-gauges{display:flex;height:100%;align-items:center;width:calc(var(--pl-gauge-count) * 180px);min-width:80px;max-width:100%;flex:0 1 calc(var(--pl-gauge-count) * 180px);container-type:inline-size}.pl-status-compact{display:none;align-items:center;height:100%;padding:0 6px;font-size:11px;white-space:nowrap;color:var(--ui-text-tertiary)}@media(max-width:650px){.pl-status-gauges [data-provider-chip]{display:none}.pl-status-compact{display:inline-flex}}@container(max-width:179px){.pl-status-gauges[data-gauge-count="1"] [data-provider-chip]{display:none}.pl-status-gauges[data-gauge-count="1"] .pl-status-compact{display:inline-flex}}@container(max-width:359px){.pl-status-gauges[data-gauge-count="2"] [data-provider-chip]{display:none}.pl-status-gauges[data-gauge-count="2"] .pl-status-compact{display:inline-flex}}@container(max-width:539px){.pl-status-gauges[data-gauge-count="3"] [data-provider-chip]{display:none}.pl-status-gauges[data-gauge-count="3"] .pl-status-compact{display:inline-flex}}.pl-status-popover{width:288px;max-width:calc(100vw - 24px);padding:12px;font-size:12px}.pl-status-popover-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.pl-status-popover-head h3{font-size:12px;font-weight:600;margin:0}.pl-status-popover-head span{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window-list{display:grid;gap:14px}.pl-status-window{display:grid;gap:6px}.pl-status-window-head{display:flex;justify-content:space-between;gap:10px}.pl-status-window-head>:last-child{font-variant-numeric:tabular-nums}.pl-status-chip-value[data-level=caution]{color:var(--ui-yellow)}.pl-status-chip-value[data-level=warning]{color:var(--ui-orange)}.pl-status-chip-value[data-level=critical]{color:var(--ui-red)}.pl-status-chip-pace{color:var(--ui-text-quaternary);font-weight:400}.pl-pace-value{color:var(--ui-yellow);font-weight:500;margin-left:6px}.pl-pace-track{display:flex;height:7px;overflow:hidden;border-radius:4px;background:var(--ui-stroke-secondary)}.pl-pace-track i{height:100%}.pl-pace-track [data-segment=used]{background:var(--ui-text-secondary)}.pl-pace-track [data-segment=pace-room]{background:var(--ui-yellow)}.pl-pace-track [data-segment=over-pace]{background:var(--ui-orange)}.pl-status-reset,.pl-status-window time,.pl-status-freshness,.pl-status-provenance{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window time{color:var(--ui-text-quaternary)}.pl-pace-legend{display:flex;gap:12px;margin:14px 0;color:var(--ui-text-tertiary);font-size:10px}.pl-pace-legend i{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:4px}.pl-pace-legend [data-legend=used]{background:var(--ui-text-secondary)}.pl-pace-legend [data-legend=paceRoom]{background:var(--ui-yellow)}.pl-pace-legend [data-legend=overPace]{background:var(--ui-orange)}.pl-status-freshness{margin-bottom:8px}.pl-status-provenance{margin-top:8px;color:var(--ui-text-quaternary);font-size:10px}
+.pl-status-gauges{position:relative;display:flex;height:100%;align-items:stretch;min-width:5rem;max-width:100%;overflow-x:clip}.pl-status-chips{display:flex;flex:none;height:100%;align-items:stretch;gap:0.125rem}.pl-status-compact{display:none;position:absolute;inset:0 auto 0 0;align-items:center;height:100%;padding:0 0.375rem;font-size:0.6875rem;white-space:nowrap;color:var(--ui-text-tertiary)}.pl-status-gauges[data-crowded] .pl-status-chips{visibility:hidden}.pl-status-gauges[data-crowded] .pl-status-compact{display:inline-flex}@media(max-width:650px){.pl-status-chips{display:none}.pl-status-compact{display:inline-flex;position:static}}
+.pl-status-chip{display:inline-flex;flex:none;height:100%;align-items:center;gap:0.25rem;border-radius:0;padding:0 0.375rem;font-size:0.6875rem;white-space:nowrap;color:var(--ui-text-tertiary);transition-property:color,background-color;transition-duration:.15s}.pl-status-chip:hover{background-color:var(--chrome-action-hover);color:var(--color-foreground,var(--dt-foreground))}.pl-status-chip-value{color:color-mix(in srgb,var(--dt-muted-foreground,var(--ui-text-tertiary)) 80%,transparent)}.pl-status-popover{width:288px;max-width:calc(100vw - 24px);padding:12px;font-size:12px}.pl-status-popover-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.pl-status-popover-head h3{font-size:12px;font-weight:600;margin:0}.pl-status-popover-head span{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window-list{display:grid;gap:14px}.pl-status-window{display:grid;gap:6px}.pl-status-window-head{display:flex;justify-content:space-between;gap:10px}.pl-status-window-head>:last-child{font-variant-numeric:tabular-nums}.pl-status-chip-value[data-level=caution]{color:var(--ui-yellow)}.pl-status-chip-value[data-level=warning]{color:var(--ui-orange)}.pl-status-chip-value[data-level=critical]{color:var(--ui-red)}.pl-status-chip-pace{color:var(--ui-text-quaternary);font-weight:400}.pl-pace-value{color:var(--ui-yellow);font-weight:500;margin-left:6px}.pl-pace-track{display:flex;height:7px;overflow:hidden;border-radius:4px;background:var(--ui-stroke-secondary)}.pl-pace-track i{height:100%}.pl-pace-track [data-segment=used]{background:var(--ui-text-secondary)}.pl-pace-track [data-segment=pace-room]{background:var(--ui-yellow)}.pl-pace-track [data-segment=over-pace]{background:var(--ui-orange)}.pl-status-reset,.pl-status-window time,.pl-status-freshness,.pl-status-provenance{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window time{color:var(--ui-text-quaternary)}.pl-pace-legend{display:flex;gap:12px;margin:14px 0;color:var(--ui-text-tertiary);font-size:10px}.pl-pace-legend i{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:4px}.pl-pace-legend [data-legend=used]{background:var(--ui-text-secondary)}.pl-pace-legend [data-legend=paceRoom]{background:var(--ui-yellow)}.pl-pace-legend [data-legend=overPace]{background:var(--ui-orange)}.pl-status-freshness{margin-bottom:8px}.pl-status-provenance{margin-top:8px;color:var(--ui-text-quaternary);font-size:10px}
 `
 
 function Fact({ fact, tools, inheritedUnitCode, inheritedUnit, inheritedCurrencyCode }) {
@@ -947,15 +948,29 @@ function ProviderGauge({ provider, query, profile, connection, tools, transportE
   const resetFact = ['ok', 'stale'].includes(provider.status) ? provider.facts?.find(fact =>
     (fact.display?.label || legacyDescriptor(fact.label, 'factLabel'))?.code === 'fact.availableResets') : null
   const resets = Number.isSafeInteger(resetFact?.value) && resetFact.value >= 0 ? resetFact.value : null
+  // One line like the host's context gauge: `<label> [bar] N% [pace]`. The
+  // window name the chip used to show ("7d") and the stale state live in the
+  // native tooltip, which reuses the popover's own window wording.
+  const windowLabel = weekly ? statusWindowLabel(weekly, tools) : null
+  const chipTitle = used === null
+    ? `${title} · ${tools.t('statusBar.unavailable')}`
+    : [title, weeklyState.allowance === null
+      ? tools.t('statusBar.usedAria', windowLabel, usedText)
+      : tools.t('statusBar.paceAria', windowLabel, usedText, statusPercent(weeklyState.allowance, tools)),
+    provider.status === 'stale' && tools.t('statusBar.freshness.stale')].filter(Boolean).join(' · ')
   return h(Popover, { children: [
     h(PopoverTrigger, { asChild: true, children: h('button', {
-      type: 'button', 'aria-label': title, 'data-provider-chip': provider.id,
-      className: 'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+      type: 'button', 'aria-label': title, title: chipTitle, 'data-provider-chip': provider.id,
+      className: 'pl-status-chip inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
       children: used === null
         ? `${providerLabel} · ${tools.t('statusBar.unavailable')}`
         : [
-            h('span', { className: 'text-(--ui-text-tertiary)', children: `${providerLabel} · ${tools.t('statusBar.weeklyShort')}` }),
-            h('span', { className: 'tabular-nums pl-status-chip-value', 'data-level': weeklyState.level, children: `${compactQuotaBar(used)} ${usedText}` }),
+            h('span', { className: 'pl-status-chip-label', children: providerLabel }),
+            jsxs('span', { className: 'tabular-nums pl-status-chip-value', 'data-level': weeklyState.level, children: [
+              h('span', { className: 'pl-status-chip-bar', children: compactQuotaBar(used) }),
+              ' ',
+              h('span', { className: 'pl-status-chip-percent', children: usedText })
+            ] }),
             weeklyState.allowance !== null && h('span', { className: 'pl-status-chip-pace', children: `[${statusPercent(weeklyState.allowance, tools)}]` }),
             provider.status === 'stale' && h('span', { className: 'text-(--ui-text-quaternary)', children: '∗' })
           ]
@@ -988,6 +1003,24 @@ export function StatusGaugeRoot({ ctx }) {
   const enabledIds = GAUGE_PROVIDER_IDS.filter(id => scoped[id])
   const query = useQuery(quotaQueryOptions(ctx, connection, profile, enabledIds.length > 0))
   const displayProviders = useQuotaProviders(query, enabledIds.length > 0)
+  // The root asks the host's content-sized right cluster for its chips' own
+  // width. When the bar is too crowded to grant it, the host shrinks the root
+  // below that width; the chips then stay in layout but invisible (so the
+  // requested width, and this measurement, cannot oscillate) and the compact
+  // "Usage · N" route covers the root instead.
+  const [rootNode, setRootNode] = useState(null)
+  const [crowded, setCrowded] = useState(false)
+  useEffect(() => {
+    if (!rootNode || typeof ResizeObserver !== 'function') return undefined
+    const row = rootNode.querySelector('.pl-status-chips')
+    const measure = () => setCrowded(Boolean(row) &&
+      rootNode.getBoundingClientRect().width + 0.5 < row.getBoundingClientRect().width)
+    const observer = new ResizeObserver(measure)
+    observer.observe(rootNode)
+    if (row) observer.observe(row)
+    measure()
+    return () => observer.disconnect()
+  }, [rootNode])
 
   if (!enabledIds.length) return null
   if (query.error && isBackendUnavailableError(query.error)) {
@@ -1006,12 +1039,12 @@ export function StatusGaugeRoot({ ctx }) {
     return [h(ProviderGauge, { provider, query, profile, connection, tools, transportError: Boolean(query.error) }, providerId)]
   })
   return chips.length ? h('div', { className: 'pl-status-gauges', 'data-gauge-count': chips.length,
-    style: { '--pl-gauge-count': chips.length }, children: [
+    'data-crowded': crowded ? '' : undefined, ref: setRootNode, children: [
     h('style', { children: STATUS_CSS }),
     h('button', { type: 'button', className: 'pl-status-compact',
       'aria-label': tools.t('command.open'), onClick: () => host.navigate(PATH),
       children: `${tools.t('nav.usage')} · ${enabledIds.length}` }),
-    ...chips
+    h('div', { className: 'pl-status-chips', children: chips })
   ] }) : null
 }
 

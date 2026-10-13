@@ -208,7 +208,7 @@ test('pace math honors the start threshold, stale and rolling suppression, and u
   assert.deepEqual(JSON.parse(JSON.stringify(paceSegments(20, 40))), { used: 20, paceRoom: 20, overPace: 0, remaining: 60 })
 })
 
-test('provider chips are semantic buttons inside native popovers without hover tooltips', async () => {
+test('provider chips are semantic buttons inside native popovers with a native title, not hover tooltips', async () => {
   const reset = new Date(Date.now() + 4 * 86400000).toISOString()
   const providers = quota.providers.map(item => ({ ...item, windows: item.id === 'anthropic'
     ? [
@@ -231,7 +231,14 @@ test('provider chips are semantic buttons inside native popovers without hover t
   assert.ok(triggers.every(trigger => trigger.props.asChild === true))
   const buttons = nodes.filter(node => node.type === 'button' && node.props['data-provider-chip'])
   assert.deepEqual(buttons.map(node => node.props['data-provider-chip']), ['anthropic', 'openai-codex', 'zai'])
-  assert.ok(buttons.every(button => button.props.type === 'button' && button.props.title === undefined))
+  assert.ok(buttons.every(button => button.props.type === 'button'))
+  // The one-line chip moves its window label into the native title.
+  assert.deepEqual(buttons.map(button => button.props.title), [
+    'Claude usage · Weekly window: 20% used, 43% pace allowance',
+    'GPT usage · Weekly window: 30% used, 43% pace allowance',
+    'GLM / Z.ai usage · Weekly window: 40% used, 43% pace allowance'
+  ])
+  assert.ok(buttons.every(button => !text(button).includes('7d')))
   assert.ok(buttons.every(button => /chrome-action-hover/.test(button.props.className)))
   assert.equal(nodes.filter(node => node.type === 'Tip').length, 0)
   const contents = nodes.filter(node => node.type === 'PopoverContent')
