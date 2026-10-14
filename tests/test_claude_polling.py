@@ -107,7 +107,11 @@ def test_cedar_reply_keeps_plain_windows_fable_limit_and_reset_times(monkeypatch
         ('seven_day', 57.0, WEEK_RESET, 604800.0),
         ('weekly_scoped_fable', 20.0, WEEK_RESET, 604800.0),
     ]
-    assert [f['display']['label'] for f in result['facts']] == [f['display']['label'] for f in expected['facts']]
+    # The gated cedar block (no grants, an ineligible_reason) adds only the
+    # claude.ai reset link; every other fact is what the plain reply gave.
+    assert [f['display']['label'] for f in result['facts'] if 'url' not in f] == [
+        f['display']['label'] for f in expected['facts']]
+    assert [f['url'] for f in result['facts'] if 'url' in f] == ['https://claude.ai/settings/usage']
 
 
 def test_reset_probe_runs_at_most_hourly_per_identity_and_its_answer_is_reused(monkeypatch, clock):

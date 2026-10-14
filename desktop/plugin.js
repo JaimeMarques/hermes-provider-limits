@@ -114,6 +114,7 @@ export const LOCALES = {
       source: source => `Source: ${source}`,
       fetchedAt: date => `Fetched ${date}`,
       openProvider: 'Open provider',
+      resetsSeeClaudeAi: 'Resets: see claude.ai',
       unlimited: 'Unlimited',
       remaining: 'remaining',
       meterAria: (group, window) => `${group} · ${window} · used`,
@@ -157,7 +158,8 @@ export const LOCALES = {
       value: {
         unlimited: 'Unlimited', disabled: 'Disabled', providerQuotaUnavailable: 'Provider quota unavailable',
         firstRequest: 'On first request', notIndicated: 'Not reported',
-        flashEquivalentCredits: 'Flash-equivalent credits; not USD'
+        flashEquivalentCredits: 'Flash-equivalent credits; not USD',
+        seeClaudeAi: 'see claude.ai'
       },
       period: { unspecified: 'Unspecified period', units: (countText, count) => `${countText} ${count === 1 ? 'period unit' : 'period units'}` },
       detail: { tool: 'Tool' },
@@ -567,6 +569,31 @@ export const STATUS_CSS = `
 .pl-status-chip{display:inline-flex;flex:none;height:100%;align-items:center;gap:0.25rem;border-radius:0;padding:0 0.375rem;font-size:0.6875rem;white-space:nowrap;color:var(--ui-text-tertiary);transition-property:color,background-color;transition-duration:.15s}.pl-status-chip:hover{background-color:var(--chrome-action-hover);color:var(--color-foreground,var(--dt-foreground))}.pl-status-chip-value{color:color-mix(in srgb,var(--dt-muted-foreground,var(--ui-text-tertiary)) 80%,transparent)}.pl-status-popover{width:288px;max-width:calc(100vw - 24px);padding:12px;font-size:12px}.pl-status-popover-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.pl-status-popover-head h3{font-size:12px;font-weight:600;margin:0}.pl-status-popover-head span{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window-list{display:grid;gap:14px}.pl-status-window{display:grid;gap:6px}.pl-status-window-head{display:flex;justify-content:space-between;gap:10px}.pl-status-window-head>:last-child{font-variant-numeric:tabular-nums}.pl-status-chip-value[data-level=caution]{color:var(--ui-yellow)}.pl-status-chip-value[data-level=warning]{color:var(--ui-orange)}.pl-status-chip-value[data-level=critical]{color:var(--ui-red)}.pl-status-chip-pace{color:var(--ui-text-quaternary);font-weight:400}.pl-pace-value{color:var(--ui-yellow);font-weight:500;margin-left:6px}.pl-pace-track{display:flex;height:7px;overflow:hidden;border-radius:4px;background:var(--ui-stroke-secondary)}.pl-pace-track i{height:100%}.pl-pace-track [data-segment=used]{background:var(--ui-text-secondary)}.pl-pace-track [data-segment=pace-room]{background:var(--ui-yellow)}.pl-pace-track [data-segment=over-pace]{background:var(--ui-orange)}.pl-status-reset,.pl-status-window time,.pl-status-freshness,.pl-status-provenance{color:var(--ui-text-tertiary);font-size:11px}.pl-status-window time{color:var(--ui-text-quaternary)}.pl-pace-legend{display:flex;gap:12px;margin:14px 0;color:var(--ui-text-tertiary);font-size:10px}.pl-pace-legend i{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:4px}.pl-pace-legend [data-legend=used]{background:var(--ui-text-secondary)}.pl-pace-legend [data-legend=paceRoom]{background:var(--ui-yellow)}.pl-pace-legend [data-legend=overPace]{background:var(--ui-orange)}.pl-status-freshness{margin-bottom:8px}.pl-status-provenance{margin-top:8px;color:var(--ui-text-quaternary);font-size:10px}
 `
 
+// The Claude Code login's usage reply hides the reset grants (cedar_ember
+// ineligible_reason, e.g. "surface"); the backend then sends this fact with
+// claude.ai's usage page instead of a count. Only a claude.ai page is opened.
+export function resetLinkUrl(fact) {
+  const label = fact?.display?.label || legacyDescriptor(fact?.label, 'factLabel')
+  const value = fact?.display?.value
+  if (label?.code !== 'fact.availableResets' || value?.kind !== 'message' || value.code !== 'value.seeClaudeAi' ||
+      typeof fact.url !== 'string') return null
+  try {
+    const url = new URL(fact.url)
+    return url.protocol === 'https:' && url.hostname === 'claude.ai' && !url.username && !url.password ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+// Opens in the user's browser through the host (PluginOs.openExternal); a host
+// without it gets the same text, unlinked.
+function ResetLink({ url, ctx, tools }) {
+  const label = tools.t('quota.resetsSeeClaudeAi')
+  return ctx?.os?.openExternal
+    ? h(Button, { variant: 'link', size: 'inline', onClick: () => ctx.os.openExternal(url), children: label })
+    : h('span', { children: label })
+}
+
 function Fact({ fact, tools, inheritedUnitCode, inheritedUnit, inheritedCurrencyCode }) {
   const label = displayText(fact.display?.label, fact.label, tools, 'factLabel')
   const valueRole = fact.display?.value == null && /^.+ · fim do período$/.test(String(fact.label))
@@ -664,6 +691,9 @@ function Provider({ provider: p, ctx, tools }) {
   const status = statusValue === statusKey ? p.status : statusValue
   const defaultPlan = { 'openai-codex': tools.t('quota.openaiPlan'), anthropic: tools.t('quota.anthropicPlan'), deepseekv4pro: 'deepseekv4pro.com', zai: 'Coding Plan' }[p.id]
   const plan = providerPlanText(p, tools, defaultPlan)
+  const facts = Array.isArray(p.facts) ? p.facts : []
+  const listedFacts = facts.filter(fact => !resetLinkUrl(fact))
+  const resetLinks = facts.map(resetLinkUrl).filter(Boolean)
   return jsxs('section', { className: 'pl-section', 'aria-labelledby': `pl-${p.id}`, children: [
     jsxs('div', { className: 'pl-section-head', children: [
       jsxs('div', { className: 'pl-identity', children: [h('span', { className: 'pl-mark', 'aria-hidden': true, children: { 'openai-codex': '>_', anthropic: 'Cl', deepseekv4pro: 'ds', zai: 'Z' }[p.id] }), jsxs('div', { children: [h('h2', { id: `pl-${p.id}`, children: p.name }), h('div', { className: 'pl-plan', children: plan })] })] }),
@@ -671,7 +701,8 @@ function Provider({ provider: p, ctx, tools }) {
     ] }),
     (p.problem || p.error) && jsxs('div', { className: 'pl-alert', role: 'status', children: [h(Codicon, { name: 'warning' }), jsxs('div', { children: [p.status === 'stale' && h('strong', { children: tools.t('quota.staleNotice') }), localizedError(p.problem, p.error, tools)] })] }),
     ...Array.from(groups, ([group, windows]) => jsxs('div', { className: 'pl-group', children: [h('h3', { className: 'pl-group-title', children: group }), h('div', { className: 'pl-windows', children: windows.map(w => h(Meter, { value: w, tools, providerId: p.id }, w.id)) })] }, group)),
-    p.facts?.length > 0 && h('dl', { className: 'pl-facts', children: p.facts.map((fact, i) => h(Fact, { fact, tools }, i)) }),
+    listedFacts.length > 0 && h('dl', { className: 'pl-facts', children: listedFacts.map((fact, i) => h(Fact, { fact, tools }, i)) }),
+    resetLinks.length > 0 && h('div', { className: 'pl-facts', children: resetLinks.map(url => h(ResetLink, { url, ctx, tools }, url)) }),
     jsxs('div', { className: 'pl-source', children: [p.source && h('span', { children: tools.t('quota.source', p.source) }), p.fetched_at && h('time', { dateTime: p.fetched_at, children: tools.t('quota.fetchedAt', tools.dateTime.format(new Date(p.fetched_at))) }), p.url && ctx.os?.openExternal && h(Button, { variant: 'link', size: 'inline', onClick: () => ctx.os.openExternal(p.url), children: tools.t('quota.openProvider') })] })
   ] })
 }
@@ -931,7 +962,7 @@ function StatusWindow({ window, provider, tools, now }) {
   ] })
 }
 
-function ProviderGauge({ provider, query, profile, connection, tools, transportError = false }) {
+function ProviderGauge({ ctx, provider, query, profile, connection, tools, transportError = false }) {
   const now = Date.now()
   const { weekly, relevant } = selectProviderWindows(provider)
   const weeklyState = weekly ? quotaPaceState(weekly, provider.status, now) : null
@@ -954,6 +985,7 @@ function ProviderGauge({ provider, query, profile, connection, tools, transportE
   const resetFact = ['ok', 'stale'].includes(provider.status) ? provider.facts?.find(fact =>
     (fact.display?.label || legacyDescriptor(fact.label, 'factLabel'))?.code === 'fact.availableResets') : null
   const resets = Number.isSafeInteger(resetFact?.value) && resetFact.value >= 0 ? resetFact.value : null
+  const resetUrl = resetFact ? resetLinkUrl(resetFact) : null
   // One line like the host's context gauge: `<label> [bar] N% [pace]`. The
   // window name the chip used to show ("7d") and the stale state live in the
   // native tooltip, which reuses the popover's own window wording.
@@ -985,12 +1017,14 @@ function ProviderGauge({ provider, query, profile, connection, tools, transportE
       jsxs('div', { className: 'pl-status-popover-head', children: [h('h3', { children: title }), provider.plan && h('span', { children: provider.plan })] }),
       relevant.length ? h('div', { className: 'pl-status-window-list', children: relevant.map(window => h(StatusWindow, { window, provider, tools, now }, `${window.id}:${window.period_seconds}`)) }) : h('p', { children: tools.t('statusBar.unavailable') }),
       h('div', { className: 'pl-pace-legend', children: ['used', 'paceRoom', 'overPace'].map(name => jsxs('span', { children: [h('i', { 'data-legend': name }), tools.t(`statusBar.legend.${name}`)] }, name)) }),
-      ['anthropic', 'openai-codex'].includes(provider.id) && h('dl', { className: 'pl-status-resets', children: h(Fact, {
-        tools, fact: { value: resets, display: {
-          label: { kind: 'message', code: 'fact.availableResets' },
-          ...(resets === null ? { value: { kind: 'message', code: 'value.notIndicated' } } : {})
-        } }
-      }) }),
+      ['anthropic', 'openai-codex'].includes(provider.id) && (resetUrl
+        ? h('div', { className: 'pl-status-resets', children: h(ResetLink, { url: resetUrl, ctx, tools }) })
+        : h('dl', { className: 'pl-status-resets', children: h(Fact, {
+          tools, fact: { value: resets, display: {
+            label: { kind: 'message', code: 'fact.availableResets' },
+            ...(resets === null ? { value: { kind: 'message', code: 'value.notIndicated' } } : {})
+          } }
+        }) })),
       h('div', { className: 'pl-status-freshness', children: freshness }),
       h(Button, { variant: 'secondary', size: 'sm', disabled: refreshDisabled, onClick: () => { if (!refreshDisabled) query.refetch() }, children: query.isFetching ? tools.t('action.refreshing') : cooldown > 0 ? tools.t('statusBar.refreshEligible', compactDuration(cooldown, tools)) : tools.t('action.refresh') }),
       h('div', { className: 'pl-status-provenance', children: tools.t('statusBar.provenance', profile, connection) })
@@ -1042,7 +1076,7 @@ export function StatusGaugeRoot({ ctx }) {
   const chips = enabledIds.flatMap(providerId => {
     const provider = providers.get(providerId)
     if (!provider) return []
-    return [h(ProviderGauge, { provider, query, profile, connection, tools, transportError: Boolean(query.error) }, providerId)]
+    return [h(ProviderGauge, { ctx, provider, query, profile, connection, tools, transportError: Boolean(query.error) }, providerId)]
   })
   return chips.length ? h('div', { className: 'pl-status-gauges', 'data-gauge-count': chips.length,
     'data-crowded': crowded ? '' : undefined, ref: setRootNode, children: [

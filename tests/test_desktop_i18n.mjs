@@ -22,6 +22,7 @@ async function loadPlugin({
   historyData = null,
   quotaError = null,
   legacyHost = false,
+  os = { openExternal() {} },
   transformSource = source => source
 } = {}) {
   const state = {
@@ -110,7 +111,7 @@ async function loadPlugin({
       set(key, value) { state.stored.set(key, value) }
     }
   }
-  if (!legacyHost) ctx.os = { openExternal() {} }
+  if (!legacyHost) ctx.os = os
   module.namespace.default.register(ctx)
   return { mod: module.namespace, state }
 }
@@ -796,4 +797,33 @@ test('OAuth identity problem codes have their own English copy, not the generic 
     assert.ok(rendered.includes(text), `${code} renders its copy`)
     assert.doesNotMatch(rendered, /Unable to retrieve usage with the credentials in this profile/, code)
   }
+})
+
+test('Usage page shows the Claude reset link fact as "Resets: see claude.ai" opening claude.ai', async () => {
+  const opened = []
+  const data = {
+    schema_version: 2, problem: null, error: null, refresh_seconds: 60,
+    providers: [{
+      id: 'anthropic', name: 'Claude', status: 'ok', source: 'api.anthropic.com · oauth/usage',
+      url: 'https://claude.ai/settings/usage', fetched_at: new Date().toISOString(), error: null, problem: null,
+      windows: [{ id: 'seven_day', label: '7 d', group: 'Claude', unit: '%', unit_code: 'percent',
+        display: { label: { kind: 'period', value: 7, unit: 'day' }, group: { kind: 'literal', value: 'Claude' } },
+        used: null, limit: null, remaining: null, used_percent: 65, remaining_percent: 35, reset_at: null, unlimited: false }],
+      facts: [{ label: 'Reposições disponíveis', value: null, url: 'https://claude.ai/settings/usage',
+        display: { label: { kind: 'message', code: 'fact.availableResets' },
+          value: { kind: 'message', code: 'value.seeClaudeAi' } } }]
+    }]
+  }
+  const { state } = await loadPlugin({ quotaData: data, historyData,
+    os: { openExternal: url => { opened.push(url); return Promise.resolve(true) } } })
+  const page = state.contributions.find(item => item.area === 'routes').render()
+  const text = flattenText(page).join(' ')
+  assert.match(text, /Resets: see claude\.ai/)
+  assert.doesNotMatch(text, /Available resets/)
+  const links = findNodes(page, node => typeof node.props?.onClick === 'function' &&
+    flattenText(node.props.children).join(' ') === 'Resets: see claude.ai')
+  assert.equal(links.length, 1)
+  assert.equal(links[0].props.variant, 'link')
+  links[0].props.onClick()
+  assert.deepEqual(opened, ['https://claude.ai/settings/usage'])
 })

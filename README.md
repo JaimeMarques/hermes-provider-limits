@@ -39,8 +39,14 @@ presented as a guessed model. Missing, rolling, expired, and stale reset/pace
 information is not presented as a fresh allowance.
 
 Both Claude and GPT popovers show a read-only **Available resets** row below the
-quota sections. A reported zero stays `0`; missing, invalid, or surface-gated
-inventory is **Not reported**. This is not the scheduled quota reset countdown.
+quota sections. A reported zero stays `0`; missing or invalid inventory is
+**Not reported**. This is not the scheduled quota reset countdown.
+When Claude's reply has no Cedar grants and an `ineligible_reason` (the Claude
+Code login gets `"surface"`: the server hides the inventory that claude.ai
+shows) and no count from Juniper, the row reads **Resets: see claude.ai**,
+linking to `https://claude.ai/settings/usage` through the host's
+`ctx.os.openExternal`, like the owner's gnome-ai-limits helper. The Usage page
+shows the same link.
 The row uses the existing facts, localization, and shared cache (including its
 900-second stale ceiling and hard-auth revocation); Z.ai has no reset row.
 

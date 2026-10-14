@@ -206,13 +206,16 @@ def window(key, label, group="Geral", *, used=None, limit=None, remaining=None,
             "unit_code": unit_code}
 
 
-def fact(label, value, *, label_display=None, value_display=None, unit_code=None):
+def fact(label, value, *, label_display=None, value_display=None, unit_code=None, url=None):
     result = {"label": label, "value": value,
               "display": {"label": label_display or display_literal(label)}}
     if value_display is not None:
         result["display"]["value"] = value_display
     if unit_code is not None:
         result["unit_code"] = unit_code
+    if url is not None:
+        # Optional: a provider page that shows what the API does not report.
+        result["url"] = url
     return result
 
 
@@ -318,6 +321,18 @@ def claude_reset_count(payload):
     return None
 
 
+def claude_resets_hidden(payload):
+    """No grants plus an ineligible_reason: the server hides the reset inventory
+    from this login (Claude Code's gets "surface", checked 2026-10-14) while
+    claude.ai lists it. Same rule as the owner's gnome-ai-limits helper."""
+    cedar = payload.get("cedar_ember")
+    if not isinstance(cedar, dict):
+        return False
+    grants = cedar.get("grants")
+    reason = cedar.get("ineligible_reason")
+    return not (grants if isinstance(grants, list) else []) and isinstance(reason, str) and bool(reason)
+
+
 def normalize_claude(payload):
     labels = {"five_hour": ("5 h", {"kind": "period", "value": 5, "unit": "hour"}),
               "seven_day": ("7 d", {"kind": "period", "value": 7, "unit": "day"}),
@@ -387,6 +402,11 @@ def normalize_claude(payload):
     if count is not None:
         facts.append(fact("Reposições disponíveis", count,
                           label_display=display_message("fact.availableResets")))
+    elif claude_resets_hidden(payload):
+        # Not a count: the API does not report them here; claude.ai does.
+        facts.append(fact("Reposições disponíveis", None,
+                          label_display=display_message("fact.availableResets"),
+                          value_display=display_message("value.seeClaudeAi"), url=LINKS["anthropic"]))
     return {"windows": windows, "facts": facts, "plan": None, "source": "api.anthropic.com · oauth/usage"}
 
 

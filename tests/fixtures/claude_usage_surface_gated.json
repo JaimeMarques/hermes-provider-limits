@@ -1,0 +1,23 @@
+{
+  "_comment": "Shaped like the live cedar_ember=1&skip_spend=1 reply of 2026-10-14 (Claude Code login, sanitized): the reset grants are hidden from this surface. five_hour, seven_day, cedar_ember and juniper_tide are copied as read; other keys are omitted.",
+  "five_hour": {
+    "utilization": 5.0,
+    "resets_at": "2026-10-14T19:50:00.151902+00:00"
+  },
+  "seven_day": {
+    "utilization": 65.0,
+    "resets_at": "2026-10-17T13:00:00.151922+00:00"
+  },
+  "cedar_ember": {
+    "eligible": false,
+    "ineligible_reason": "surface",
+    "at_limit": false,
+    "exhausted": [],
+    "grants": [],
+    "next_grant_id": null,
+    "weekly_resets_at": null,
+    "cooldown_until": null,
+    "event_props": null
+  },
+  "juniper_tide": null
+}

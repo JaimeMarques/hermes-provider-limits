@@ -127,9 +127,11 @@ def test_claude_cedar_reset_inventory(count):
     assert [f['value'] for f in facts] == ([count] if type(count) is int and count >= 0 else [])
 
 
-@pytest.mark.parametrize('block', [None, {}, {'eligible': False, 'ineligible_reason': 'surface', 'grants': []},
+@pytest.mark.parametrize('block', [None, {},
                                   {'eligible': True, 'grants': [{'resets_left': 2, 'ends_at': 'bad'}]}])
 def test_claude_unevaluated_gated_or_malformed_resets_stay_unknown(block):
+    # A surface-gated block (no grants plus an ineligible_reason) is no longer
+    # silent: it points to claude.ai (tests/test_claude_reset_link.py).
     result = api.normalize_claude({'cedar_ember': block, 'juniper_tide': None,
                                   'seven_day': {'utilization': 22}})
     assert result['facts'] == []
@@ -167,7 +169,9 @@ def test_claude_reset_discovery_reuses_selected_credential_and_preserves_auth_fa
     else:
         result = api.fetch_provider({'id': 'anthropic'})
         assert result['windows'][0]['used_percent'] == 22
-        assert [f['value'] for f in result['facts']] == ([] if failure else [1])
+        # A failed probe leaves the gated cedar block: the claude.ai link, not a count.
+        assert [(f['value'], f.get('url')) for f in result['facts']] == (
+            [(None, 'https://claude.ai/settings/usage')] if failure else [(1, None)])
     expected = ['https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1',
                 'https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1']
     assert [url for url, _ in calls] == expected
