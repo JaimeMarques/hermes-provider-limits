@@ -122,7 +122,7 @@ def test_hard_auth_failure_clears_good_data_immediately():
     now = [1000.0]
     cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
     cache.get("anthropic", "identity", lambda: {"quota": 42})
-    now[0] += 180
+    now[0] += 300
 
     result = cache.get(
         "anthropic",
@@ -141,7 +141,7 @@ def test_transient_oauth_refresh_failure_retains_bounded_stale_data():
     now = [1000.0]
     cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
     cache.get("anthropic", "identity", lambda: {"quota": 42})
-    now[0] += 180
+    now[0] += 300
 
     result = cache.get(
         "anthropic",
@@ -159,7 +159,7 @@ def test_terminal_invalid_grant_revokes_stale_data():
     now = [1000.0]
     cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
     cache.get("anthropic", "identity", lambda: {"quota": 42})
-    now[0] += 180
+    now[0] += 300
 
     result = cache.get(
         "anthropic",
@@ -411,3 +411,100 @@ def test_concurrent_callers_for_one_identity_perform_one_fetch():
 
     assert len(calls) == 1
     assert [result.good for result in results] == [{"quota": 42}, {"quota": 42}]
+
+
+def test_anthropic_poll_floor_matches_the_helper_five_minutes():
+    cache_module = load_cache_module()
+    now = [1000.0]
+    cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
+    calls = []
+
+    def fetch():
+        calls.append(now[0])
+        return {"quota": len(calls)}
+
+    assert cache_module.POLL_FLOOR["anthropic"] == 300.0
+    first = cache.get("anthropic", "identity", fetch)
+    now[0] += 299
+    assert cache.get("anthropic", "identity", fetch).status == "cached"
+    now[0] += 1
+    assert cache.get("anthropic", "identity", fetch).status == "fresh"
+    assert first.next_refresh_at == 1300.0
+    assert calls == [1000.0, 1300.0]
+
+
+def limited(retry_after=0):
+    return lambda: (_ for _ in ()).throw(
+        FetchFailure("upstream.rateLimited", status=429, retry_after=retry_after)
+    )
+
+
+def test_anthropic_rate_limit_gate_survives_identity_key_change():
+    cache_module = load_cache_module()
+    now = [1000.0]
+    cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
+    cache.get("anthropic", "old-key", limited())
+
+    now[0] += 10
+    gated = cache.get("anthropic", "new-key", lambda: (_ for _ in ()).throw(AssertionError("gated")))
+
+    assert gated.status == "unavailable"
+    assert gated.good is None
+    assert gated.problem_code == "upstream.rateLimited"
+    assert gated.next_refresh_at == 1300.0
+    now[0] = 1300.0
+    assert cache.get("anthropic", "new-key", lambda: {"quota": 1}).status == "fresh"
+
+
+def test_anthropic_gate_honours_retry_after_beyond_the_entry_cap_up_to_an_hour():
+    cache_module = load_cache_module()
+    now = [1000.0]
+    cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
+
+    first = cache.get("anthropic", "a", limited(1200))
+    assert first.next_refresh_at == 2200.0
+    now[0] = 1300.0
+    assert cache.get("anthropic", "a", lambda: (_ for _ in ()).throw(AssertionError("gated"))).status == "unavailable"
+    now[0] = 2200.0
+    huge = cache.get("anthropic", "b", limited(99999))
+    assert huge.next_refresh_at == 2200.0 + cache_module.PROVIDER_GATE_CAP_SECONDS == 5800.0
+
+
+def test_anthropic_gate_keeps_bounded_stale_data_of_other_identities():
+    cache_module = load_cache_module()
+    now = [1000.0]
+    cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
+    cache.get("anthropic", "a", lambda: {"quota": 42})
+    now[0] = 1100.0
+    cache.get("anthropic", "b", limited(600))  # gate until 1700
+    now[0] = 1300.0
+
+    held = cache.get("anthropic", "a", lambda: (_ for _ in ()).throw(AssertionError("gated")))
+
+    assert held.status == "stale"
+    assert held.good == {"quota": 42}
+    assert held.problem_code == "upstream.rateLimited"
+    assert held.next_refresh_at == 1700.0
+    now[0] = 1901.0  # past the stale ceiling while still gated by a later 429
+    cache.get("anthropic", "b", limited(3600))
+    expired = cache.get("anthropic", "a", lambda: (_ for _ in ()).throw(AssertionError("gated")))
+    assert expired.status == "unavailable" and expired.good is None
+
+
+def test_successful_fetch_with_probe_rate_limit_sets_the_provider_gate():
+    cache_module = load_cache_module()
+    now = [1000.0]
+    cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
+    fresh = cache.get("anthropic", "a", lambda: {"quota": 1, "_rate_limit_retry_after": 900})
+    assert fresh.status == "fresh" and fresh.next_refresh_at == 1900.0
+    now[0] = 1500.0
+    gated = cache.get("anthropic", "b", lambda: (_ for _ in ()).throw(AssertionError("gated")))
+    assert gated.status == "unavailable" and gated.next_refresh_at == 1900.0
+
+
+def test_codex_rate_limits_stay_per_identity():
+    cache_module = load_cache_module()
+    now = [1000.0]
+    cache = cache_module.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
+    cache.get("openai-codex", "a", limited())
+    assert cache.get("openai-codex", "b", lambda: {"quota": 1}).status == "fresh"

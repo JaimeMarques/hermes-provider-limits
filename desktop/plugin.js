@@ -168,8 +168,14 @@ export const LOCALES = {
       auth: {
         oauthRequired: 'Claude limits require an OAuth account in Hermes; an API key does not expose subscription quota.',
         rejected: 'Authentication expired or denied. Check the provider in Hermes.',
-        forbidden: 'The provider denied access to usage data.'
+        forbidden: 'The provider denied access to usage data.',
+        ownedOAuthRequired: 'Limits need an OAuth login that belongs to this Hermes profile.',
+        ownedOAuthUnavailable: 'The selected OAuth login cannot be refreshed safely.',
+        invalidGrant: 'The OAuth login has expired. Sign in again in Hermes.',
+        refreshFailed: 'The OAuth login could not be refreshed right now. Try again in a minute.',
+        accountIdentityUnavailable: 'The selected OAuth account could not be verified.'
       },
+      account: { changed: 'The selected account changed during the update; the earlier data was discarded.' },
       credentials: { missing: 'No usable credential exists for this provider in the Hermes profile.', unreadable: 'The Hermes profile credentials could not be read.' },
       network: { unreachable: 'The usage API could not be reached. Try again in a minute.' },
       upstream: { rateLimited: 'Usage requests are temporarily rate-limited by the provider.', http: (statusText, _status) => `The usage API returned HTTP ${statusText}.` },

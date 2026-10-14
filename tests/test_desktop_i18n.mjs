@@ -773,3 +773,27 @@ test('legacy SDK shape without connectionId or ctx.os renders without crashing',
   assert.ok(quota, 'quota query was never registered')
   assert.equal(quota.queryKey[2], null, 'legacy host must use a neutral connection key')
 })
+
+test('OAuth identity problem codes have their own English copy, not the generic fallback', async () => {
+  const expected = {
+    'auth.ownedOAuthRequired': 'Limits need an OAuth login that belongs to this Hermes profile.',
+    'auth.ownedOAuthUnavailable': 'The selected OAuth login cannot be refreshed safely.',
+    'auth.invalidGrant': 'The OAuth login has expired. Sign in again in Hermes.',
+    'auth.refreshFailed': 'The OAuth login could not be refreshed right now. Try again in a minute.',
+    'auth.accountIdentityUnavailable': 'The selected OAuth account could not be verified.',
+    'account.changed': 'The selected account changed during the update; the earlier data was discarded.'
+  }
+  const { state } = await loadPlugin()
+  const generic = translate(state.bundles, 'en', 'problem.generic')
+  for (const [code, text] of Object.entries(expected)) {
+    assert.equal(translate(state.bundles, 'en', `problem.${code}`), text, code)
+    assert.notEqual(text, generic, code)
+
+    const data = structuredClone(quotaData)
+    Object.assign(data.providers[0], { status: 'unavailable', error: null, problem: { code, params: {}, retryable: false } })
+    const page = await loadPlugin({ quotaData: data, historyData })
+    const rendered = flattenText(page.state.contributions.find(item => item.area === 'routes').render()).join(' ')
+    assert.ok(rendered.includes(text), `${code} renders its copy`)
+    assert.doesNotMatch(rendered, /Unable to retrieve usage with the credentials in this profile/, code)
+  }
+})

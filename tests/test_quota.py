@@ -16,6 +16,19 @@ sys.modules[spec.name] = api
 spec.loader.exec_module(api)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_claude_poll_state():
+    # The hourly reset probe and the provider 429 gate are process state.
+    probes = getattr(api, '_claude_probes', None)
+    for reset in (getattr(probes, 'clear', None), api._quota_cache.clear):
+        if reset:
+            reset()
+    yield
+    for reset in (getattr(probes, 'clear', None), api._quota_cache.clear):
+        if reset:
+            reset()
+
+
 def test_codex_duration_not_position_and_every_additional_limit():
     payload = {'rate_limit': {'primary_window': {'used_percent': 71, 'limit_window_seconds': 604800}, 'secondary_window': None},
                'additional_rate_limits': [{'limit_name': 'GPT-5.3-Codex-Spark', 'rate_limit': {
@@ -138,12 +151,12 @@ def test_claude_reset_discovery_reuses_selected_credential_and_preserves_auth_fa
 
     def get(url, headers):
         calls.append((url, headers))
-        if '?' not in url:
-            return {'seven_day': {'utilization': 22}, 'cedar_ember': None, 'juniper_tide': None}
+        if 'cedar_ember=1' in url:
+            # One GET: the cedar variant carries the plain reply's windows too.
+            return {'seven_day': {'utilization': 22}, 'juniper_tide': None,
+                    'cedar_ember': {'eligible': False, 'ineligible_reason': 'no_grant', 'grants': []}}
         if failure:
             raise api.QuotaError('fixture', status=failure)
-        if 'cedar_ember=1' in url:
-            return {'cedar_ember': {'eligible': False, 'ineligible_reason': 'no_grant', 'grants': []}}
         return {'juniper_tide': {'eligible': True, 'arm': 'reset', 'available': True}}
 
     monkeypatch.setattr(api, 'get_json', get)
@@ -155,10 +168,8 @@ def test_claude_reset_discovery_reuses_selected_credential_and_preserves_auth_fa
         result = api.fetch_provider({'id': 'anthropic'})
         assert result['windows'][0]['used_percent'] == 22
         assert [f['value'] for f in result['facts']] == ([] if failure else [1])
-    expected = ['https://api.anthropic.com/api/oauth/usage',
-                'https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1']
-    if failure is None:
-        expected.append('https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1')
+    expected = ['https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1',
+                'https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1']
     assert [url for url, _ in calls] == expected
     assert all(headers['Authorization'] == 'Bearer selected-test-token' for _, headers in calls)
 
@@ -243,21 +254,19 @@ def test_claude_inline_cedar_zero_does_not_skip_juniper_discovery(monkeypatch, j
     assert [f['value'] for f in result['facts']] == ([int(juniper_result)] if type(juniper_result) is bool else [])
 
 
-@pytest.mark.parametrize('probe_query', ['cedar_ember=1', 'at_wall=1'])
-def test_optional_reset_rate_limit_keeps_fresh_quota_and_cache_cooldown(monkeypatch, probe_query):
+def test_optional_reset_rate_limit_keeps_fresh_quota_and_cache_cooldown(monkeypatch):
     now = [1000.0]
     cache = api.QuotaCache(clock=lambda: now[0], randomness=lambda _a, _b: 0)
     monkeypatch.setattr(api, '_quota_cache', cache)
+    monkeypatch.setattr(api, '_clock', lambda: now[0])
     monkeypatch.setattr(api, 'request_with_owned_oauth', lambda provider, request: request(SimpleNamespace(token='fixture')))
     calls = []
 
     def get(url, headers):
         calls.append(url)
-        if '?' not in url:
-            return {'seven_day': {'utilization': 22}}
-        if probe_query in url:
+        if 'at_wall=1' in url:
             raise api.QuotaError('fixture', status=429, code='upstream.rateLimited', retry_after=300)
-        return {'cedar_ember': {'eligible': True, 'grants': []}}
+        return {'seven_day': {'utilization': 22}, 'cedar_ember': {'eligible': True, 'grants': []}}
 
     monkeypatch.setattr(api, 'get_json', get)
     provider, scope = {'id': 'anthropic'}, ('profile', 'fixture')
@@ -269,27 +278,29 @@ def test_optional_reset_rate_limit_keeps_fresh_quota_and_cache_cooldown(monkeypa
     assert result['next_refresh_at'] == '1970-01-01T00:21:40+00:00'
     assert 'retry_after' not in json.dumps(result)
     request_count = len(calls)
+    assert calls == ['https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1',
+                     'https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1']
     now[0] = 1181
     assert api.cached_provider(provider, scope)['windows'] == result['windows']
     assert len(calls) == request_count
     now[0] = 1300
     api.cached_provider(provider, scope)
-    assert len(calls) == request_count * 2
+    # The reset probe ran (and was limited) this hour: only the usage GET repeats.
+    assert calls[request_count:] == ['https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1']
 
 
-@pytest.mark.parametrize('inline', [False, True])
-def test_claude_reported_cedar_resets_stop_extra_discovery(monkeypatch, inline):
+def test_claude_reported_cedar_resets_stop_extra_discovery(monkeypatch):
     calls = []
     block = {'eligible': True, 'grants': [cedar_grant(starts_at=None, ends_at=None)]}
     monkeypatch.setattr(api, 'request_with_owned_oauth', lambda provider, request: request(SimpleNamespace(token='fixture')))
 
     def get(url, headers):
         calls.append(url)
-        return {'cedar_ember': block if inline or '?' in url else None}
+        return {'cedar_ember': block}
 
     monkeypatch.setattr(api, 'get_json', get)
     assert api.fetch_provider({'id': 'anthropic'})['facts'][0]['value'] == 2
-    assert len(calls) == (1 if inline else 2)
+    assert calls == ['https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1']
 
 
 @pytest.mark.parametrize('status,age', [(503, 180), (503, 901), (401, 180), (403, 180)])
@@ -745,7 +756,6 @@ def test_oauth_provider_fetches_use_owned_adapter_without_returning_identity(mon
 
     assert adapter_calls == ['anthropic', 'openai-codex']
     assert [url for url, _ in http_calls] == [
-        'https://api.anthropic.com/api/oauth/usage',
         'https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1',
         'https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1',
         'https://chatgpt.com/backend-api/wham/usage',

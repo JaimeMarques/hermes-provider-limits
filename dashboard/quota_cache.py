@@ -11,13 +11,18 @@ import time
 from typing import Callable
 
 POLL_FLOOR = {
-    "anthropic": 180.0,
+    # One GET every 5 minutes, like the owner's gnome-ai-limits helper.
+    "anthropic": 300.0,
     "openai-codex": 120.0,
     "zai": 180.0,
     "deepseekv4pro": 180.0,
 }
 MAX_STALE_SECONDS = 900.0
 BACKOFF_CAP_SECONDS = 300.0
+# A 429 on these providers' shared account endpoint pauses every identity of
+# that provider: cache keys change on login, the upstream limit does not.
+PROVIDER_GATED = frozenset({"anthropic"})
+PROVIDER_GATE_CAP_SECONDS = 3600.0
 
 
 @dataclass
@@ -50,15 +55,40 @@ class QuotaCache:
         self._entries: dict[tuple[str, str], CacheEntry] = {}
         self._locks: dict[tuple[str, str], threading.Lock] = {}
         self._lock_users: dict[tuple[str, str], int] = {}
+        self._gates: dict[str, float] = {}
         self._guard = threading.Lock()
 
     def clear(self) -> None:
         with self._guard:
             self._entries.clear()
+            self._gates.clear()
             self._locks = {
                 key: lock for key, lock in self._locks.items()
                 if self._lock_users.get(key, 0)
             }
+
+    def provider_gate(self, provider_id: str, now: float | None = None) -> float | None:
+        """Return when an active provider-wide 429 gate ends, else None."""
+        now = self._clock() if now is None else now
+        with self._guard:
+            until = self._gates.get(provider_id)
+            if until is not None and now >= until:
+                self._gates.pop(provider_id, None)
+                until = None
+        return until
+
+    def _gate(self, provider_id: str, now: float, wait: float, raw_retry_after) -> float:
+        """Record a provider-wide 429 gate; return the wait this entry must honour."""
+        if provider_id not in PROVIDER_GATED:
+            return wait
+        retry_after = float(raw_retry_after) if isinstance(raw_retry_after, (int, float)) else 0.0
+        if not math.isfinite(retry_after):
+            retry_after = 0.0
+        until = now + max(wait, min(max(0.0, retry_after), PROVIDER_GATE_CAP_SECONDS))
+        with self._guard:
+            until = max(until, self._gates.get(provider_id, until))
+            self._gates[provider_id] = until
+        return until - now
 
     def get(self, provider_id: str, identity_key: str, fetch: Callable[[], dict]) -> CacheView:
         key = (identity_key, provider_id)
@@ -94,6 +124,26 @@ class QuotaCache:
             )
             return self._view(entry, now, status)
 
+        gate = self.provider_gate(provider_id, now)
+        if gate is not None:
+            # Another identity of this provider was rate-limited: do not ask
+            # upstream again; keep this identity's bounded stale data.
+            age = None if entry is None or entry.fetched_at is None else now - entry.fetched_at
+            retain = (entry is not None and entry.good is not None and age is not None
+                      and 0 <= age <= MAX_STALE_SECONDS)
+            kept = entry if retain else None
+            entry = CacheEntry(
+                good=copy.deepcopy(kept.good) if kept is not None else None,
+                fetched_at=kept.fetched_at if kept is not None else None,
+                next_refresh_at=gate,
+                attempts=entry.attempts if entry is not None else 0,
+                problem_code=(entry.problem_code if entry is not None and entry.problem_code
+                              else "upstream.rateLimited"),
+                identity_key=identity_key,
+            )
+            self._store(key, entry)
+            return self._view(entry, now, "stale" if retain else "unavailable")
+
         try:
             good = copy.deepcopy(fetch())
         except Exception as exc:
@@ -120,6 +170,7 @@ class QuotaCache:
             wait = POLL_FLOOR.get(provider_id, 180.0)
             if is_rate_limit:
                 wait = self._rate_limit_wait(provider_id, attempts, getattr(exc, "retry_after", 0))
+                wait = self._gate(provider_id, failed_at, wait, getattr(exc, "retry_after", 0))
             entry = CacheEntry(
                 good=retained_good,
                 fetched_at=retained_at,
@@ -138,6 +189,7 @@ class QuotaCache:
             # Optional enrichment may fail while ordinary quota remains fresh.
             attempts = min((entry.attempts if entry is not None else 0) + 1, 10)
             wait = self._rate_limit_wait(provider_id, attempts, retry_after)
+            wait = self._gate(provider_id, fetched_at, wait, retry_after)
         entry = CacheEntry(
             good=good,
             fetched_at=fetched_at,
