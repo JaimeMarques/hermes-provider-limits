@@ -45,14 +45,13 @@ When Claude's reply has no Cedar grants and an `ineligible_reason` (the Claude
 Code login gets `"surface"`: the server hides the inventory that claude.ai
 shows) and no count from Juniper, the row reads **Resets: see claude.ai**,
 linking to `https://claude.ai/settings/usage` through the host's
-`ctx.os.openExternal`, like the owner's gnome-ai-limits helper. The Usage page
-shows the same link.
+`ctx.os.openExternal`. The Usage page shows the same link.
 The row uses the existing facts, localization, and shared cache (including its
 900-second stale ceiling and hard-auth revocation); Z.ai has no reset row.
 
 Claude usage is one GET `/api/oauth/usage?cedar_ember=1&skip_spend=1` per
 refresh (the reply carries the windows, the model-scoped weekly limits and the
-Cedar grants), like the owner's gnome-ai-limits helper. When the reset count is
+Cedar grants). When the reset count is
 still unknown, `?at_wall=1&skip_spend=1` runs at most once an hour per login and
 never during a Claude 429 backoff; its answer is reused for that hour. Both run
 inside the already-selected credential

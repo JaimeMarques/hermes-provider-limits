@@ -62,7 +62,7 @@ _quota_cache = QuotaCache()
 PROBLEM_PARAM_KEYS = {"upstream.http": frozenset({"status"})}
 _clock = time.time
 
-# Claude polls like the owner's gnome-ai-limits helper: one GET per refresh.
+# Claude polls with one GET per refresh.
 # The cedar_ember variant (Claude Code's own) carries the plain reply's
 # windows and limits plus the reset grants.
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -324,7 +324,7 @@ def claude_reset_count(payload):
 def claude_resets_hidden(payload):
     """No grants plus an ineligible_reason: the server hides the reset inventory
     from this login (Claude Code's gets "surface", checked 2026-10-14) while
-    claude.ai lists it. Same rule as the owner's gnome-ai-limits helper."""
+    claude.ai lists it."""
     cedar = payload.get("cedar_ember")
     if not isinstance(cedar, dict):
         return False

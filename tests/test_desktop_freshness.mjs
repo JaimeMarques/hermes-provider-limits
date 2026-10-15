@@ -283,7 +283,7 @@ test('two gauges show individual chips in a content-sized Desktop status-bar clu
 })
 
 test('two gauges render one line each like the host context gauge at the real status-bar height', async t => {
-  // Owner-reported values (2026-10-14 screenshot): Claude 55% used at 49% pace,
+  // Sample values: Claude 55% used at 49% pace,
   // GPT 47% at 11%. resetHours places each weekly window at that pace point.
   const screenshot = process.env.PL_GAUGES_SCREENSHOT
   const page = await browserFixture(t, { hostBar: {}, viewportWidth: 1300, viewportHeight: 40, contextGauge: true,

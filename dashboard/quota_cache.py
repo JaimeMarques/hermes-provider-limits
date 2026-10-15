@@ -11,7 +11,7 @@ import time
 from typing import Callable
 
 POLL_FLOOR = {
-    # One GET every 5 minutes, like the owner's gnome-ai-limits helper.
+    # One GET every 5 minutes.
     "anthropic": 300.0,
     "openai-codex": 120.0,
     "zai": 180.0,

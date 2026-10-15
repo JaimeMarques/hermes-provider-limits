@@ -1,4 +1,4 @@
-"""Claude polls like the owner's helper: one GET per refresh, an hourly reset
+"""Claude polling: one GET per refresh, an hourly reset
 probe, cache keys that ignore pool bookkeeping, and a provider-level 429 gate.
 
 Offline: HTTP and the owned-OAuth adapter are mocked; nothing reaches Anthropic.

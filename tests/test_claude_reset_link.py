@@ -2,8 +2,8 @@
 
 The OAuth usage reply for the Claude Code login carries cedar_ember with no
 grants and an ineligible_reason ("surface"), and juniper_tide null, while
-claude.ai shows the resets. Like the owner's gnome-ai-limits helper, the
-plugin then reports "resets: see claude.ai" with a link, not a count.
+claude.ai shows the resets. The plugin then reports "resets: see claude.ai"
+with a link, not a count.
 
 Offline: HTTP and the owned-OAuth adapter are mocked; nothing reaches Anthropic.
 """
