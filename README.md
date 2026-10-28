@@ -39,13 +39,22 @@ presented as a guessed model. Missing, rolling, expired, and stale reset/pace
 information is not presented as a fresh allowance.
 
 Both Claude and GPT popovers show a read-only **Available resets** row below the
-quota sections. A reported zero stays `0`; missing, invalid, or surface-gated
-inventory is **Not reported**. This is not the scheduled quota reset countdown.
+quota sections. A reported zero stays `0`; missing or invalid inventory is
+**Not reported**. This is not the scheduled quota reset countdown.
+When Claude's reply has no Cedar grants and an `ineligible_reason` (the Claude
+Code login gets `"surface"`: the server hides the inventory that claude.ai
+shows) and no count from Juniper, the row reads **Resets: see claude.ai**,
+linking to `https://claude.ai/settings/usage` through the host's
+`ctx.os.openExternal`. The Usage page shows the same link.
 The row uses the existing facts, localization, and shared cache (including its
 900-second stale ceiling and hard-auth revocation); Z.ai has no reset row.
 
-Claude's OAuth discovery uses GET `/api/oauth/usage?cedar_ember=1&skip_spend=1`,
-then `?at_wall=1&skip_spend=1` if needed, inside the already-selected credential
+Claude usage is one GET `/api/oauth/usage?cedar_ember=1&skip_spend=1` per
+refresh (the reply carries the windows, the model-scoped weekly limits and the
+Cedar grants). When the reset count is
+still unknown, `?at_wall=1&skip_spend=1` runs at most once an hour per login and
+never during a Claude 429 backoff; its answer is reused for that hour. Both run
+inside the already-selected credential
 adapter. No browser cookies, account switching, redemption, or separate UI
 polling is added. Evaluated Cedar offers report `grants[].resets_left` (expired
 grants excluded); otherwise an eligible Juniper `arm: "reset"` with explicit
@@ -101,7 +110,7 @@ Run **Rescan** in **Capabilities → Plugins** to refresh the Desktop half.
 - Outbound quota requests are HTTPS-only, restricted to exact provider hosts, size-limited, time-bounded, and forbidden from following redirects.
 - Error responses do not expose provider bodies, tokens, account identifiers, or emails.
 - Local history opens `state.db` read-only and selects accounting columns only; it does not read prompts or messages.
-- Cache and singleflight are process-local, isolated by profile and a server-side configuration/credential signature. Provider request floors are 120 seconds for Codex and 180 seconds for Claude, Z.ai, and DeepSeek; the UI checks the shared route every 60 seconds. Rate-limit backoff is capped at 300 seconds; soft failures retain explicitly stale data for at most 900 seconds. Hard authentication/account failures revoke it.
+- Cache and singleflight are process-local, isolated by profile and a server-side configuration/credential signature. The signature keys on configuration and login identity (pool row ids, sources and selection order; singleton presence and account ids), not on pool bookkeeping or token rotation, so Hermes's own auth-file writes do not discard cached quota or backoff. Provider request floors are 120 seconds for Codex, 300 seconds for Claude, and 180 seconds for Z.ai and DeepSeek; the UI checks the shared route every 60 seconds. Rate-limit backoff is capped at 300 seconds per identity; a Claude 429 also pauses every Claude identity for its `Retry-After` (default 300 seconds, at most one hour). Soft failures retain explicitly stale data for at most 900 seconds. Hard authentication/account failures revoke it.
 - OAuth selection follows Hermes pool strategy without implicit refresh. Only allowlisted Hermes-owned grants can refresh, at most once per request, proactively near expiry or after one 401. Borrowed Claude Code grants are rejected. An unsuccessful 401 recovery remains a hard failure. Hermes core owns pool seeding, grant persistence, and cross-process refresh locking; the plugin does not read vendor CLI credential files itself.
 
 Third-party plugins execute inside Hermes. Review the source before enabling it.

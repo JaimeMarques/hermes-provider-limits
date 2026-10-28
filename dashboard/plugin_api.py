@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from email.utils import parsedate_to_datetime
 import hashlib
 import importlib.util
@@ -9,7 +10,8 @@ import json
 import math
 import re
 import sys
-
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,6 +60,49 @@ NAMES = {"openai-codex": "Codex", "anthropic": "Claude", "deepseekv4pro": "DeepS
 LINKS = {"openai-codex": "https://chatgpt.com/codex/settings/usage", "anthropic": "https://claude.ai/settings/usage", "deepseekv4pro": "https://deepseekv4pro.com/dashboard", "zai": "https://z.ai/manage-apikey/subscription"}
 _quota_cache = QuotaCache()
 PROBLEM_PARAM_KEYS = {"upstream.http": frozenset({"status"})}
+_clock = time.time
+
+# Claude polls with one GET per refresh.
+# The cedar_ember variant (Claude Code's own) carries the plain reply's
+# windows and limits plus the reset grants.
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_USAGE_QUERY = "cedar_ember=1&skip_spend=1"
+CLAUDE_RESET_PROBE_QUERY = "at_wall=1&skip_spend=1"
+CLAUDE_RESET_PROBE_SECONDS = 3600.0
+
+
+class _ResetProbes:
+    """When each Claude login last ran the at_wall reset probe, and its answer."""
+
+    def __init__(self, max_entries: int = 64):
+        self._lock = threading.Lock()
+        self._max_entries = max_entries
+        self._seen: dict[tuple, tuple[float, object]] = {}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
+
+    def claim(self, key: tuple, now: float, *, allowed: bool) -> tuple[bool, object]:
+        """Claim this hour's probe for ``key``, or return the last answer."""
+        with self._lock:
+            seen = self._seen.get(key)
+            if seen is not None and 0 <= now - seen[0] < CLAUDE_RESET_PROBE_SECONDS:
+                return False, copy.deepcopy(seen[1])
+            if not allowed:
+                return False, None
+            self._seen[key] = (now, None)
+            while len(self._seen) > self._max_entries:
+                self._seen.pop(min(self._seen, key=lambda item: self._seen[item][0]))
+            return True, None
+
+    def record(self, key: tuple, at: float, answer) -> None:
+        with self._lock:
+            if key in self._seen and self._seen[key][0] == at:
+                self._seen[key] = (at, copy.deepcopy(answer))
+
+
+_claude_probes = _ResetProbes()
 
 
 class QuotaError(Exception):
@@ -161,13 +206,16 @@ def window(key, label, group="Geral", *, used=None, limit=None, remaining=None,
             "unit_code": unit_code}
 
 
-def fact(label, value, *, label_display=None, value_display=None, unit_code=None):
+def fact(label, value, *, label_display=None, value_display=None, unit_code=None, url=None):
     result = {"label": label, "value": value,
               "display": {"label": label_display or display_literal(label)}}
     if value_display is not None:
         result["display"]["value"] = value_display
     if unit_code is not None:
         result["unit_code"] = unit_code
+    if url is not None:
+        # Optional: a provider page that shows what the API does not report.
+        result["url"] = url
     return result
 
 
@@ -273,6 +321,18 @@ def claude_reset_count(payload):
     return None
 
 
+def claude_resets_hidden(payload):
+    """No grants plus an ineligible_reason: the server hides the reset inventory
+    from this login (Claude Code's gets "surface", checked 2026-10-14) while
+    claude.ai lists it."""
+    cedar = payload.get("cedar_ember")
+    if not isinstance(cedar, dict):
+        return False
+    grants = cedar.get("grants")
+    reason = cedar.get("ineligible_reason")
+    return not (grants if isinstance(grants, list) else []) and isinstance(reason, str) and bool(reason)
+
+
 def normalize_claude(payload):
     labels = {"five_hour": ("5 h", {"kind": "period", "value": 5, "unit": "hour"}),
               "seven_day": ("7 d", {"kind": "period", "value": 7, "unit": "day"}),
@@ -342,6 +402,11 @@ def normalize_claude(payload):
     if count is not None:
         facts.append(fact("Reposições disponíveis", count,
                           label_display=display_message("fact.availableResets")))
+    elif claude_resets_hidden(payload):
+        # Not a count: the API does not report them here; claude.ai does.
+        facts.append(fact("Reposições disponíveis", None,
+                          label_display=display_message("fact.availableResets"),
+                          value_display=display_message("value.seeClaudeAi"), url=LINKS["anthropic"]))
     return {"windows": windows, "facts": facts, "plan": None, "source": "api.anthropic.com · oauth/usage"}
 
 
@@ -529,28 +594,32 @@ def fetch_provider(provider):
         return request_with_owned_oauth("openai-codex", fetch_codex)
     if kind == "anthropic":
         def fetch_claude(credential):
-            url = "https://api.anthropic.com/api/oauth/usage"
             headers = {"Authorization": f"Bearer {credential.token}", "anthropic-beta": "oauth-2025-04-20",
                        "User-Agent": "claude-code/2.1.0"}
-            payload = get_json(url, headers)
+            payload = get_json(f"{CLAUDE_USAGE_URL}?{CLAUDE_USAGE_QUERY}", headers)
             retry_after = None
-            # Read-only discovery belongs to this same credential and quota cache.
-            # Never infer zero from the unevaluated null blocks in plain /usage.
+            # Never infer zero from an unevaluated juniper_tide block. The
+            # at_wall probe (the 5-hour reset offer) runs at most hourly per
+            # login, never during a provider 429 gate; its answer is reused.
             if claude_reset_count(payload) is None:
-                try:
-                    for field, query in (("cedar_ember", "cedar_ember=1"), ("juniper_tide", "at_wall=1")):
-                        probe = get_json(f"{url}?{query}&skip_spend=1", headers)
-                        payload[field] = probe.get(field)
-                        if (claude_reset_count(payload) or 0) > 0:
-                            break
-                except QuotaError as exc:
-                    if exc.status in (401, 403) or exc.hard:
-                        raise
-                    # Optional discovery failure must not hide ordinary quotas.
-                    payload.pop("cedar_ember", None)
-                    payload.pop("juniper_tide", None)
-                    if exc.status == 429:
-                        retry_after = exc.retry_after
+                probe_key = (getattr(credential, "credential_id", None), getattr(credential, "source", None))
+                probed_at = _clock()
+                claimed, juniper = _claude_probes.claim(
+                    probe_key, probed_at, allowed=_quota_cache.provider_gate("anthropic") is None)
+                if claimed:
+                    try:
+                        probe = get_json(f"{CLAUDE_USAGE_URL}?{CLAUDE_RESET_PROBE_QUERY}", headers)
+                        juniper = probe.get("juniper_tide")
+                        _claude_probes.record(probe_key, probed_at, juniper)
+                    except QuotaError as exc:
+                        if exc.status in (401, 403) or exc.hard:
+                            raise
+                        # Optional discovery failure must not hide ordinary quotas.
+                        juniper = None
+                        if exc.status == 429:
+                            retry_after = exc.retry_after
+                if juniper is not None:
+                    payload["juniper_tide"] = juniper
             result = normalize_claude(payload)
             if retry_after is not None:
                 # Internal cache metadata, removed before serialization.
@@ -650,21 +719,104 @@ def fetch_deepseek(token):
     return normalize_deepseek(payload)
 
 
+_POOL_ROW_IDENTITY = ("id", "source", "auth_type", "base_url")
+_SINGLETON_IDENTITY = ("auth_mode", "account_id", "detected_endpoint")
+
+
+def _digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _pool_strategy(provider):
+    try:
+        from agent.credential_pool import get_pool_strategy
+        return get_pool_strategy(provider)
+    except Exception:
+        return "fill_first"
+
+
+def _auth_identity(path):
+    """Who is logged in, per auth store: row ids, sources and selection order.
+
+    Pool bookkeeping (request_count, last_status, errors, updated_at) and token
+    rotation of the same row are deliberately absent: Hermes persists them on
+    every request, and keying on them dropped the cache and its 429 backoff.
+    """
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeError):
+        data = None
+    if not isinstance(data, dict):
+        # Unreadable shape: any change may be a different login.
+        return {"unparsed": hashlib.sha256(raw).hexdigest()}
+    pools = {}
+    raw_pools = data.get("credential_pool")
+    for provider, rows in sorted(raw_pools.items() if isinstance(raw_pools, dict) else []):
+        if not isinstance(rows, list):
+            pools[provider] = {"unparsed": _digest(rows)}
+            continue
+        ordered = []
+        for index, row in enumerate(rows):
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]:
+                identity = [row.get(field) for field in _POOL_ROW_IDENTITY]
+                priority = row.get("priority")
+                rank = priority if type(priority) in (int, float) and math.isfinite(priority) else math.inf
+            else:
+                # No stable row id: a changed row cannot be told from a new login.
+                identity, rank = ["unidentified", _digest(row)], math.inf
+            ordered.append((rank, index, identity))
+        if _pool_strategy(provider) == "fill_first":
+            # fill_first selects the first available row: the order is identity.
+            pools[provider] = [identity for _rank, _index, identity in sorted(ordered)]
+        else:
+            # Rotating strategies reorder rows on use; only the set is identity.
+            pools[provider] = sorted((identity for _rank, _index, identity in ordered), key=_digest)
+    singletons = {}
+    raw_singletons = data.get("providers")
+    for provider, state in sorted(raw_singletons.items() if isinstance(raw_singletons, dict) else []):
+        if not isinstance(state, dict):
+            singletons[provider] = {"unparsed": _digest(state)}
+            continue
+        tokens = state.get("tokens") if isinstance(state.get("tokens"), dict) else {}
+        singletons[provider] = {
+            "keys": sorted(state), "token_keys": sorted(tokens),
+            **{field: state.get(field, tokens.get(field)) for field in _SINGLETON_IDENTITY},
+        }
+    return {"pools": pools, "providers": singletons,
+            "active_provider": data.get("active_provider"),
+            "suppressed_sources": data.get("suppressed_sources")}
+
+
 def _signature(home):
     # Hash stays server-side, isolates cache on credential/config change.
     digest = hashlib.sha256()
     from hermes_constants import get_default_hermes_root
-    paths = [home / name for name in ("config.yaml", "auth.json", ".env", ".anthropic_oauth.json")]
+    homes = [home]
     root = get_default_hermes_root()
     if root.resolve() != home.resolve():
         # Hermes can borrow the default profile's OAuth pool/auth singleton.
         # A root login/logout must invalidate a named profile's cached quota
         # even when nothing in that named profile's directory has changed.
-        paths.extend((root / "auth.json", root / ".anthropic_oauth.json"))
-    for path in paths:
-        if path.is_file():
-            digest.update(str(path).encode())
-            digest.update(path.read_bytes())
+        homes.append(root)
+    for index, base in enumerate(homes):
+        if index == 0:
+            for name in ("config.yaml", ".env"):
+                path = base / name
+                if path.is_file():
+                    digest.update(str(path).encode())
+                    digest.update(path.read_bytes())
+        path = base / "auth.json"
+        digest.update(str(path).encode())
+        digest.update(json.dumps(_auth_identity(path), sort_keys=True, default=str).encode())
+        # The Claude PKCE singleton rotates its tokens on refresh; a login or
+        # logout also adds or removes a pool row. Only its presence is identity.
+        path = base / ".anthropic_oauth.json"
+        digest.update(str(path).encode())
+        digest.update(b"present" if path.is_file() else b"absent")
     from agent.secret_scope import current_secret_scope
     digest.update(json.dumps(dict(current_secret_scope() or {}), sort_keys=True).encode())
     return digest.hexdigest()

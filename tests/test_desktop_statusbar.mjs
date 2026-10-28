@@ -208,7 +208,7 @@ test('pace math honors the start threshold, stale and rolling suppression, and u
   assert.deepEqual(JSON.parse(JSON.stringify(paceSegments(20, 40))), { used: 20, paceRoom: 20, overPace: 0, remaining: 60 })
 })
 
-test('provider chips are semantic buttons inside native popovers without hover tooltips', async () => {
+test('provider chips are semantic buttons inside native popovers with a native title, not hover tooltips', async () => {
   const reset = new Date(Date.now() + 4 * 86400000).toISOString()
   const providers = quota.providers.map(item => ({ ...item, windows: item.id === 'anthropic'
     ? [
@@ -231,7 +231,14 @@ test('provider chips are semantic buttons inside native popovers without hover t
   assert.ok(triggers.every(trigger => trigger.props.asChild === true))
   const buttons = nodes.filter(node => node.type === 'button' && node.props['data-provider-chip'])
   assert.deepEqual(buttons.map(node => node.props['data-provider-chip']), ['anthropic', 'openai-codex', 'zai'])
-  assert.ok(buttons.every(button => button.props.type === 'button' && button.props.title === undefined))
+  assert.ok(buttons.every(button => button.props.type === 'button'))
+  // The one-line chip moves its window label into the native title.
+  assert.deepEqual(buttons.map(button => button.props.title), [
+    'Claude usage · Weekly window: 20% used, 43% pace allowance',
+    'GPT usage · Weekly window: 30% used, 43% pace allowance',
+    'GLM / Z.ai usage · Weekly window: 40% used, 43% pace allowance'
+  ])
+  assert.ok(buttons.every(button => !text(button).includes('7d')))
   assert.ok(buttons.every(button => /chrome-action-hover/.test(button.props.className)))
   assert.equal(nodes.filter(node => node.type === 'Tip').length, 0)
   const contents = nodes.filter(node => node.type === 'PopoverContent')
@@ -437,4 +444,52 @@ test('Arabic status gauges localize percentages and use the system time zone', a
   assert.ok(pace.props['aria-label'].includes(percent), pace.props['aria-label'])
   assert.equal(time.props.children, expectedDate)
   assert.ok(state.dateTimeOptions.every(options => !Object.hasOwn(options, 'timeZone')))
+})
+
+// The Claude Code login's usage reply hides the reset grants (cedar_ember
+// ineligible_reason "surface"); the backend then sends this fact instead of a count.
+const RESET_LINK_FACT = {
+  label: 'Reposições disponíveis', value: null, url: 'https://claude.ai/settings/usage',
+  display: { label: { kind: 'message', code: 'fact.availableResets' }, value: { kind: 'message', code: 'value.seeClaudeAi' } }
+}
+
+async function claudePopover(fact, { os } = {}) {
+  const providers = [{ ...provider('anthropic', 'Claude'),
+    windows: [{ id: 'seven_day', group: 'Claude', period_seconds: 604800, used_percent: 22 }], facts: [fact] }]
+  const { state, ctx } = await loadPlugin({ anthropic: true }, {
+    data: { ...quota, providers }, error: null, isPending: false, isFetching: false, refetch() {}
+  }, { localize: true })
+  if (os) ctx.os = os
+  const root = state.contributions.find(item => item.area === 'status-right').render()
+  return walk(root).find(node => node.type === 'PopoverContent')
+}
+
+test('Claude popover shows "Resets: see claude.ai" as a host link when the API hides the grants', async () => {
+  const opened = []
+  const content = await claudePopover(RESET_LINK_FACT, { os: { openExternal: url => { opened.push(url); return Promise.resolve(true) } } })
+  const row = walk(content).find(node => node.props?.className === 'pl-status-resets')
+  assert.equal(text(row), 'Resets: see claude.ai')
+  const links = walk(row).filter(node => node.type === 'Button')
+  assert.equal(links.length, 1)
+  assert.equal(links[0].props.variant, 'link')
+  links[0].props.onClick()
+  assert.deepEqual(opened, ['https://claude.ai/settings/usage'])
+  assert.doesNotMatch(text(content), /Not reported|Available resets/)
+  assert.ok(text(content).indexOf('Resets: see claude.ai') > text(content).indexOf('Weekly window'))
+  assert.ok(text(content).indexOf('Resets: see claude.ai') < text(content).indexOf('Fresh'))
+})
+
+test('reset link without a host openExternal stays plain text; a foreign URL is never linked', async () => {
+  const legacy = await claudePopover(RESET_LINK_FACT)
+  const legacyRow = walk(legacy).find(node => node.props?.className === 'pl-status-resets')
+  assert.equal(text(legacyRow), 'Resets: see claude.ai')
+  assert.equal(walk(legacyRow).filter(node => ['button', 'Button'].includes(node.type)).length, 0)
+
+  const opened = []
+  const foreign = await claudePopover({ ...RESET_LINK_FACT, url: 'https://evil.example/claude.ai' },
+    { os: { openExternal: url => { opened.push(url) } } })
+  const row = walk(foreign).find(node => node.props?.className === 'pl-status-resets')
+  assert.equal(text(row), 'Available resets Not reported')
+  assert.equal(walk(row).filter(node => ['button', 'Button'].includes(node.type)).length, 0)
+  assert.deepEqual(opened, [])
 })
